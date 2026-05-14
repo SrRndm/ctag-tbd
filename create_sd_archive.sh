@@ -5,8 +5,8 @@ SOURCE_DIR="$1"
 BUILD_DIR="$2"
 XXH128SUM="$3"
 
-SD_CARD_ZIP="${BUILD_DIR}/tbd-sd-card.zip"
-SD_CARD_HASH="${BUILD_DIR}/tbd-sd-card-hash.txt"
+SD_CARD_ZIP="${BUILD_DIR}/dada-tbd-sd.zip"
+SD_CARD_HASH="${BUILD_DIR}/dada-tbd-sd-hash.txt"
 VERSION_FILE="${BUILD_DIR}/.version"
 
 echo "Creating SD card archive..."
@@ -17,15 +17,37 @@ TEMP_DIR="${BUILD_DIR}/temp_zip_content"
 rm -rf "${TEMP_DIR}"
 mkdir -p "${TEMP_DIR}"
 
-# Copy data folder
-echo "Copying data..."
-cp -r "${SOURCE_DIR}/sdcard_image/data" "${TEMP_DIR}/data"
+# Copy factory/user/system overlay directories
+echo "Copying factory overlay..."
+cp -r "${SOURCE_DIR}/sdcard_image/factory" "${TEMP_DIR}/factory"
+echo "Copying user overlay..."
+cp -r "${SOURCE_DIR}/sdcard_image/user" "${TEMP_DIR}/user"
+echo "Copying system overlay..."
+cp -r "${SOURCE_DIR}/sdcard_image/system" "${TEMP_DIR}/system"
 
 # Copy and gzip www files
+# Only ship what the device actually needs from Shoelace:
+#   shoelace/themes/  — CSS themes (dark + light, toggled at runtime)
+# Everything else (components/, chunks/, assets/icons/, autoloader) is unused
+# because all used components + icons are already inlined in js/shoelace-bundle.js
 echo "Copying and gzipping www files..."
 mkdir -p "${TEMP_DIR}/www"
 cd "${SOURCE_DIR}/sdcard_image/www"
-find . -type f | while read file; do
+find . -type f \
+    -not -path './node_modules/*' \
+    -not -path './tools/*' \
+    -not -path './shoelace/components/*' \
+    -not -path './shoelace/chunks/*' \
+    -not -path './shoelace/assets/*' \
+    -not -name 'shoelace.js' \
+    -not -name 'shoelace-autoloader.js' \
+    -not -name '*.DS_Store' \
+    -not -name '*.gz' \
+    -not -name 'package.json' \
+    -not -name 'package-lock.json' \
+    -not -name 'build-webui.sh' \
+    -not -name 'readme-api.md' \
+    | while read file; do
     # Create directory structure in temp
     mkdir -p "${TEMP_DIR}/www/$(dirname "$file")"
 
@@ -35,13 +57,9 @@ find . -type f | while read file; do
 done
 cd - > /dev/null
 
-# Copy tbdsamples
-echo "Copying tbdsamples..."
-cp -r "${SOURCE_DIR}/sample_rom/tbdsamples" "${TEMP_DIR}/tbdsamples"
-
-# Create backup of data folder (pre-created backup)
-echo "Creating pre-created backup (dbup)..."
-cp -r "${TEMP_DIR}/data" "${TEMP_DIR}/dbup"
+# Copy samples (audio data — lives alongside factory/user in sdcard_image/)
+echo "Copying samples..."
+cp -r "${SOURCE_DIR}/sdcard_image/samples" "${TEMP_DIR}/samples"
 
 # Create .version placeholder (will be updated with actual hash later)
 echo "placeholder" > "${TEMP_DIR}/.version"
@@ -54,12 +72,13 @@ cd "${TEMP_DIR}"
 export TZ=UTC
 find . -exec touch -t 202001010000.00 {} +
 zip -r -X "${SD_CARD_ZIP}" \
-    data \
+    factory \
+    user \
+    system \
     www \
-    tbdsamples \
-    dbup \
+    samples \
     .version \
-    -x '*.DS_Store' '*/__pycache__/*'
+    -x '*.DS_Store' '*/__pycache__/*' '*/.gitkeep'
 
 # Clean up temp directory
 cd "${BUILD_DIR}"
@@ -79,8 +98,9 @@ rm -f "${VERSION_FILE}"
 echo "SD card archive created: ${SD_CARD_ZIP}"
 echo "Hash file created: ${SD_CARD_HASH}"
 echo "Contents:"
-echo "  - /data (user data)"
+echo "  - /factory (factory default patches, macros, presets, kits)"
+echo "  - /user (user config, overrides, projects)"
+echo "  - /system (system metadata)"
 echo "  - /www (gzipped web files with .gz extension)"
-echo "  - /tbdsamples (audio samples)"
-echo "  - /dbup (pre-created backup of /data)"
+echo "  - /samples (audio data only — WAV files, previews)"
 

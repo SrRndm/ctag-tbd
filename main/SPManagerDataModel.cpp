@@ -4,7 +4,7 @@ CTAG TBD >>to be determined<< is an open source eurorack synthesizer module.
 A project conceived within the Creative Technologies Arbeitsgruppe of
 Kiel University of Applied Sciences: https://www.creative-technologies.de
 
-(c) 2020 by Robert Manzke. All rights reserved.
+(c) 2020-2026 by Robert Manzke. All rights reserved.
 
 The CTAG TBD software is licensed under the GNU General Public License
 (GPL 3.0), available here: https://www.gnu.org/licenses/gpl-3.0.txt
@@ -45,35 +45,39 @@ SPManagerDataModel::SPManagerDataModel() {
 SPManagerDataModel::~SPManagerDataModel() {
 }
 
-// checks for available sound processors based on data/sp json file entries
+// checks for available sound processors based on factory/plugins/ + user/plugins/ json file entries
 void SPManagerDataModel::getSoundProcessors() {
+#ifdef TBD_SIM
+    // In the simulator always re-scan: plugin sets change during development, and a
+    // stale cached list (e.g. after renaming a processor) would hide new plugins.
+    if (m.IsObject() && m.HasMember("availableProcessors")) m.RemoveMember("availableProcessors");
+#else
     if (m.HasMember("availableProcessors")) return;
-    DIR *dir;
-    struct dirent *ent;
+#endif
     Value sparray(kArrayType);
     m.AddMember("availableProcessors", sparray, m.GetAllocator());
-    if ((dir = opendir(string(CTAG::RESOURCES::sdcardRoot + string("/data/sp")).c_str())) != NULL) {
-        while ((ent = readdir(dir)) != NULL) {
-            string fn(ent->d_name);
-            if (fn.find("mui-") != string::npos) {
-                ESP_LOGD("SPModel", "Filename: %s", fn.c_str());
-                Document d;
-                loadJSON(d, CTAG::RESOURCES::sdcardRoot + "/data/sp/" + fn);
-                Value obj(kObjectType);
-                Value id(d["id"].GetString(), d.GetAllocator());
-                Value name(d["name"].GetString(), d.GetAllocator());
-                Value hint(kStringType);
-                obj.AddMember("id", id.Move(), m.GetAllocator());
-                obj.AddMember("name", name.Move(), m.GetAllocator());
-                obj.AddMember("isStereo", d["isStereo"], m.GetAllocator());
-                if (d.HasMember("hint")) {
-                    hint.SetString(d["hint"].GetString(), m.GetAllocator());
-                    obj.AddMember("hint", hint.Move(), m.GetAllocator());
-                }
-                m["availableProcessors"].PushBack(obj, m.GetAllocator());
+    // Use overlay: merged listing of /user/plugins/ + /factory/plugins/
+    auto patchFiles = CTAG::STORAGE::listMergedDir(CTAG::STORAGE::DIR_PLUGINS);
+    for (const auto &fn : patchFiles) {
+        if (fn.find("mui-") != string::npos) {
+            std::string resolvedPath = CTAG::STORAGE::resolveFile(CTAG::STORAGE::DIR_PLUGINS, fn);
+            if (resolvedPath.empty()) continue;
+            ESP_LOGD("SPModel", "Filename: %s", fn.c_str());
+            Document d;
+            loadJSON(d, resolvedPath);
+            Value obj(kObjectType);
+            Value id(d["id"].GetString(), d.GetAllocator());
+            Value name(d["name"].GetString(), d.GetAllocator());
+            Value hint(kStringType);
+            obj.AddMember("id", id.Move(), m.GetAllocator());
+            obj.AddMember("name", name.Move(), m.GetAllocator());
+            obj.AddMember("isStereo", d["isStereo"], m.GetAllocator());
+            if (d.HasMember("hint")) {
+                hint.SetString(d["hint"].GetString(), m.GetAllocator());
+                obj.AddMember("hint", hint.Move(), m.GetAllocator());
             }
+            m["availableProcessors"].PushBack(obj, m.GetAllocator());
         }
-        closedir(dir);
     }
     storeJSON(m, MODELJSONFN);
 }
@@ -109,6 +113,7 @@ void SPManagerDataModel::SetActivePatchNum(const int patchNum, const int chan) {
     string id = GetActiveProcessorID(chan);
     if (!m.HasMember("lastPatches")) return;
     if (!m["lastPatches"].IsArray()) return;
+    if (m["lastPatches"].GetArray().Size() <= chan) return;
     if (!m["lastPatches"][chan].IsArray()) return;
     for (auto &chanPatches : m["lastPatches"][chan].GetArray()) {
         if (!chanPatches.HasMember("id")) return;
@@ -126,6 +131,7 @@ int SPManagerDataModel::GetActivePatchNum(const int chan) {
     string id = GetActiveProcessorID(chan);
     if (!m.HasMember("lastPatches")) return 0;
     if (!m["lastPatches"].IsArray()) return 0;
+    if (m["lastPatches"].GetArray().Size() <= chan) return 0;
     if (!m["lastPatches"][chan].IsArray()) return 0;
     for (auto &chanPatches : m["lastPatches"][chan].GetArray()) {
         if (!chanPatches.HasMember("id")) return 0;
@@ -244,7 +250,8 @@ void SPManagerDataModel::ResetNetworkConfiguration() {
 const char *SPManagerDataModel::GetCStrJSONSoundProcessorPresets(const string &id) {
     json.Clear();
     Document d1, d2;
-    loadJSON(d1, CTAG::RESOURCES::sdcardRoot + "/data/sp/mp-" + id + ".jsn");
+    std::string presetFile = CTAG::STORAGE::resolveFile(CTAG::STORAGE::DIR_PLUGINS, "mp-" + id + ".json");
+    loadJSON(d1, presetFile);
     d2.SetObject();
     Value s_id(kObjectType);
     s_id.SetString(id, d2.GetAllocator());
@@ -260,7 +267,7 @@ void SPManagerDataModel::SetCStrJSONSoundProcessorPreset(const char *id, const c
     Document presets;
     presets.Parse(data);
     if(presets.HasParseError()) return;
-    storeJSON(presets, string(CTAG::RESOURCES::sdcardRoot + "/data/sp/mp-" + id + ".jsn"));
+    storeJSON(presets, CTAG::STORAGE::userFilePath(CTAG::STORAGE::DIR_PLUGINS, std::string("mp-") + id + ".json"));
 }
 
 bool SPManagerDataModel::HasPluginID(const string &id) {

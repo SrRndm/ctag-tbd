@@ -7,6 +7,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 project(tbd-sim)
 
+# Boost 1.90.0+ provides its own cmake config
+cmake_policy(SET CMP0167 NEW)
+
 add_definitions(
         -DRAPIDJSON_ALLOCATOR_DEFAULT_CHUNK_CAPACITY=16384 # rapidjson
         -DRAPIDJSON_HAS_STDSTRING=1 # rapidjson
@@ -20,12 +23,20 @@ add_definitions(
 
 set(TBD_SIM 1)
 
+# Optimise the DSP — an unoptimised build can't keep up at 44.1 kHz / 32-sample
+# blocks on a desktop and crackles. -O2 only (no -DNDEBUG, so asserts stay live).
+# Set here, before the add_subdirectory(...ctagSoundProcessor...) below, so the
+# DSP library inherits it too. (Override by passing -DCMAKE_BUILD_TYPE=... yourself.)
+if(NOT CMAKE_BUILD_TYPE)
+    add_compile_options(-O2)
+endif()
+
 ## Web Server Part
 add_library(simple-web-server INTERFACE)
 target_include_directories(simple-web-server INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/Simple-Web-Server)
 find_package(Threads REQUIRED)
 target_link_libraries(simple-web-server INTERFACE ${CMAKE_THREAD_LIBS_INIT})
-find_package(Boost 1.67.0 COMPONENTS system thread REQUIRED)
+find_package(Boost 1.67.0 COMPONENTS thread REQUIRED)
 target_link_libraries(simple-web-server INTERFACE ${Boost_LIBRARIES})
 target_include_directories(simple-web-server INTERFACE ${Boost_INCLUDE_DIR})
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 4.9)
@@ -106,6 +117,9 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../components/moog/MoogLadders/s
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/fake-idf)
 
 set(COMPONENT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../components/ctagSoundProcessor)
+# Build the GrooveBoxRack (dadamachines TBD-16) + its rack/ voices into the sim,
+# so it shows up in the plugin list and can be auditioned without hardware.
+set(CONFIG_TBD_USE_SD_CARD 1)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../components/ctagSoundProcessor ${CMAKE_CURRENT_BINARY_DIR}/ctagsp)
 
 #mutable
@@ -124,7 +138,7 @@ set(TINYWAV_FILES
 
 ## Application
 set(Boost_USE_STATIC_LIBS OFF) # set to ON if you want to use static boost libraries
-find_package(Boost 1.67.0 COMPONENTS system thread filesystem program_options)
+find_package(Boost 1.67.0 COMPONENTS thread filesystem program_options)
 if(NOT Boost_FOUND)
     message(FATAL_ERROR "could not find Boost!")
 endif()
@@ -163,6 +177,17 @@ target_include_directories(tbd-sim PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../main)
 set(TEST_FILES
         tests/test_ctagADSREnv.cpp
         tests/test_ctagADSREnv.hpp
+        # Phase 8.6 (2026-04-24e) — FX/Master DSP regression tests.
+        tests/test_fx_mixer_pan.cpp
+        tests/test_fx_mixer_pan.hpp
+        tests/test_fx1_tempo_divisor.cpp
+        tests/test_fx1_tempo_divisor.hpp
+        tests/test_predelay_ringbuf.cpp
+        tests/test_predelay_ringbuf.hpp
+        tests/test_fast_concave.cpp
+        tests/test_fast_concave.hpp
+        tests/test_format_param_value.cpp
+        tests/test_format_param_value.hpp
         tests/run_tests.cpp
         )
 
@@ -174,11 +199,43 @@ target_include_directories(run_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 target_include_directories(run_tests PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/gen_include)
 target_include_directories(run_tests PRIVATE ${Boost_INCLUDE_DIR})
 
+# load-test: construct + Init + LoadPreset + Process(once) for a sound processor
+# (or --all), no audio device needed.  Catches "loading plugin X crashes" bugs.
+add_executable(load-test tests/test_loadprocessors.cpp
+        fake-idf/esp_heap_caps.c fake-idf/esp_spi_flash.c fake-idf/esp_flash.c fake-idf/malloc.c)
+target_link_libraries(load-test ctagsp mutable esp-dsp ${Boost_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
+target_include_directories(load-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../components/ctagSoundProcessor)
+target_include_directories(load-test PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/gen_include)
+target_include_directories(load-test PRIVATE ${Boost_INCLUDE_DIR})
+
+# rack-lint: cross-checks sdcard_image/data/synthdefinitions.json against the rack's
+# runtime voice registry — catches "JSON lists machine X but no voice flips on for it"
+# and a few related drifts.  Run before authoring a new voice + as a pre-commit gate.
+add_executable(rack-lint tests/rack_lint.cpp
+        fake-idf/esp_heap_caps.c fake-idf/esp_spi_flash.c fake-idf/esp_flash.c fake-idf/malloc.c)
+target_link_libraries(rack-lint ctagsp mutable esp-dsp ${Boost_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
+target_include_directories(rack-lint PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../components/ctagSoundProcessor)
+target_include_directories(rack-lint PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/gen_include)
+target_include_directories(rack-lint PRIVATE ${Boost_INCLUDE_DIR})
+
+# routing-test: regression test for GrooveBoxRack MIDI / setTrackMachine dispatch.
+# Captures externally-observable state into a deterministic text file and diffs it
+# against tests/golden/groovebox-routing.txt — used to prove that internal refactors
+# (e.g. the switch-table → registry walk) preserve byte-identical Pico-contract behaviour.
+# Usage: `./routing-test`           — exit 0 on match, exit 1 on diff (prints first line)
+#        `./routing-test --regen`   — rewrite the golden file (intentional changes only)
+add_executable(routing-test tests/test_routing.cpp
+        fake-idf/esp_heap_caps.c fake-idf/esp_spi_flash.c fake-idf/esp_flash.c fake-idf/malloc.c)
+target_link_libraries(routing-test ctagsp mutable esp-dsp ${Boost_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
+target_include_directories(routing-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../components/ctagSoundProcessor)
+target_include_directories(routing-test PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/gen_include)
+target_include_directories(routing-test PRIVATE ${Boost_INCLUDE_DIR})
+
 # installation
 install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY true)")
 install(TARGETS tbd-sim RUNTIME DESTINATION simulator/bin)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../sdcard_image DESTINATION .)
-install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../sample_rom/sample-rom.tbd DESTINATION simulator/data)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../tools/sample-tools/sample-rom.tbd DESTINATION simulator/data)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/data DESTINATION simulator)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/www DESTINATION simulator)
 

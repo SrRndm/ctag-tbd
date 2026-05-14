@@ -21,19 +21,59 @@ respective component folders / files if different from this license.
 
 #include "codec_bba.hpp"
 
+#include <cmath>
 #include <driver/i2s_std.h>
 #include "esp_log.h"
 #include "esp_attr.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
-#include "driver/i2c.h"
+#include "driver/i2c_master.h"
 
 
 using namespace CTAG::DRIVERS;
+
+// ── Boot timing instrumentation ─────────────────────────────
+// Stores microsecond timestamps at each codec init step.
+// Printed as a summary AFTER boot (when USB serial is available to host).
+#define CODEC_MAX_STEPS 24
+static struct {
+    int64_t timestamps[CODEC_MAX_STEPS];
+    const char *labels[CODEC_MAX_STEPS];
+    int count;
+    bool reported;
+} boot_timing = {.count = 0, .reported = false};
+
+static void boot_mark(int step, const char *label) {
+    if (boot_timing.count < CODEC_MAX_STEPS) {
+        boot_timing.timestamps[boot_timing.count] = esp_timer_get_time();
+        boot_timing.labels[boot_timing.count] = label;
+        boot_timing.count++;
+    }
+}
+
+void Codec::PrintBootTiming() {
+    if (boot_timing.reported || boot_timing.count == 0) return;
+    boot_timing.reported = true;
+    ESP_LOGI("CODEC", "========== CODEC BOOT TIMING REPORT ==========");
+    int64_t t0 = boot_timing.timestamps[0];
+    for (int i = 0; i < boot_timing.count; i++) {
+        int64_t abs_us = boot_timing.timestamps[i];
+        int64_t rel_us = boot_timing.timestamps[i] - t0;
+        ESP_LOGI("CODEC", "  [step %2d] %8lld us (boot+%lld us) %s",
+                 i + 1, abs_us, rel_us, boot_timing.labels[i]);
+    }
+    ESP_LOGI("CODEC", "  Total codec init: %lld us",
+             boot_timing.timestamps[boot_timing.count - 1] - t0);
+    ESP_LOGI("CODEC", "========== END CODEC BOOT TIMING ==============");
+}
 
 static i2s_chan_handle_t tx_handle = NULL;
 static i2s_chan_handle_t rx_handle = NULL;
 
 static const char *TAG = "CODEC";
+
+static i2c_master_bus_handle_t i2c_bus_handle = NULL;
+static i2c_master_dev_handle_t i2c_dev_handle = NULL;
 
 #define I2C_PORT_NUM I2C_NUM_1 // 0 is used for OLED
 #define I2C_SDA GPIO_NUM_7
@@ -50,7 +90,6 @@ static const char *TAG = "CODEC";
 uint8_t page = 255;
 
 #define AIC3254_ADDR 0x18 // 0b0011000 (7-bit address)
-#define ACK_CHECK_EN 1
 /* tlv320aic32x4 register space (in decimal to match datasheet) */
 #define AIC32X4_REG(page, reg)    ((page * 128) + reg)
 #define    AIC32X4_PSEL        AIC32X4_REG(0, 0)
@@ -142,57 +181,31 @@ uint8_t page = 255;
 
 static void cfg_i2c(){
     ESP_LOGI(TAG, "cfg codec i2c");
-    esp_err_t err = ESP_OK;
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER,
+    i2c_master_bus_config_t bus_config = {
+        .i2c_port = I2C_PORT_NUM,
         .sda_io_num = I2C_SDA,
         .scl_io_num = I2C_SCL,
-        .sda_pullup_en = false,
-        .scl_pullup_en = false,
-        .master = {
-            .clk_speed = I2C_CLK_SPEED,
-    },
-    .clk_flags = 0,
-};
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+    };
+    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &i2c_bus_handle));
 
-    err |= i2c_param_config(I2C_PORT_NUM, &conf);
-    err |= i2c_driver_install(I2C_PORT_NUM, conf.mode, 0, 0, ESP_INTR_FLAG_LOWMED | ESP_INTR_FLAG_SHARED);
+    i2c_device_config_t dev_config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = AIC3254_ADDR,
+        .scl_speed_hz = I2C_CLK_SPEED,
+    };
+    ESP_ERROR_CHECK(i2c_master_bus_add_device(i2c_bus_handle, &dev_config, &i2c_dev_handle));
 }
 
 static void write_reg(uint8_t reg_add, uint8_t data) {
-    esp_err_t err = ESP_OK;
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    err |= i2c_master_start(cmd);
-    ESP_ERROR_CHECK(err);// send start bit
-    err |= i2c_master_write_byte(cmd, (AIC3254_ADDR << 1) | I2C_MASTER_WRITE,
-                          ACK_CHECK_EN); // aic3254 7-bit address + write bit
-    ESP_ERROR_CHECK(err);
-    err |= i2c_master_write_byte(cmd, reg_add, ACK_CHECK_EN);                // target register
-    ESP_ERROR_CHECK(err);
-    err |= i2c_master_write_byte(cmd, data, ACK_CHECK_EN);                       // target value
-    ESP_ERROR_CHECK(err);
-    err |= i2c_master_stop(cmd);                                                      // send stop bit
-    ESP_ERROR_CHECK(err);
-    err |= i2c_master_cmd_begin((i2c_port_t) I2C_PORT_NUM, cmd, 1000 / portTICK_PERIOD_MS);
-    i2c_cmd_link_delete(cmd);
-    ESP_ERROR_CHECK(err);
+    uint8_t write_buf[2] = {reg_add, data};
+    ESP_ERROR_CHECK(i2c_master_transmit(i2c_dev_handle, write_buf, sizeof(write_buf), 1000));
 }
 
 static uint8_t read_reg(uint8_t reg_add) {
-    uint8_t data = 0xFF; // dummy
-    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
-    i2c_master_start(cmd);                                                     // send start bit
-    i2c_master_write_byte(cmd, (AIC3254_ADDR << 1) | I2C_MASTER_WRITE,
-                          ACK_CHECK_EN); // aic3254 7-bit address + write bit
-    i2c_master_write_byte(cmd, reg_add, ACK_CHECK_EN);                // register to be read
-    i2c_master_start(
-            cmd);                                                     // resend start bit (see application reference guide p.80 for more info on the i2c transaction)
-    i2c_master_write_byte(cmd, (AIC3254_ADDR << 1) | I2C_MASTER_READ,
-                          ACK_CHECK_EN);  // aic3254 7-bit address + read bit
-    i2c_master_read_byte(cmd, &data, I2C_MASTER_NACK);                         // read into data buffer
-    i2c_master_stop(cmd);                                                      // send stop bit
-    i2c_master_cmd_begin((i2c_port_t) I2C_PORT_NUM, cmd, 1000 / portTICK_PERIOD_MS);
-    i2c_cmd_link_delete(cmd);
+    uint8_t data = 0xFF;
+    ESP_ERROR_CHECK(i2c_master_transmit_receive(i2c_dev_handle, &reg_add, 1, &data, 1, 1000));
     return data;
 }
 
@@ -226,65 +239,139 @@ static void identify() {
     esp_err_t err =  test_reg(0, 0);
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "AIC3254 found");
-        write_AIC32X4_reg(AIC32X4_LOLGAIN, 0b1000000); // mute lout drivers
-        write_AIC32X4_reg(AIC32X4_LORGAIN, 0b1000000); // mute lout drivers
+        // NOTE: No muting here — soft reset in cfg_codec() wipes all registers anyway
     } else {
         ESP_LOGE(TAG, "AIC3254 not found");
     }
 }
 
 void Codec::cfg_codec() {
-    ESP_LOGI(TAG, "AIC3254 configuration");
-    // issue a soft reset
-    write_AIC32X4_reg(AIC32X4_RESET, 0x01);            // (P0_R1) issue a software reset to the codec
-    vTaskDelay(10 / portTICK_PERIOD_MS); // wait for device to initialize registers
-    // configure power
-    write_AIC32X4_reg(AIC32X4_PWRCFG, 0b00001000); // (P1_R1) disable crude AVDD generation from DVDD [0b00001000]
-    write_AIC32X4_reg(AIC32X4_LDOCTL, 0x01); // (P1_R2) enable analog block, AVDD LDO powered up [0b00000001]
-    write_AIC32X4_reg(AIC32X4_CMMODE, 0x08); // (P1_R10) output common mode for LOL and LOR is 1.65 from LDOIN (= Vcc / 2) [0b00001000]
-    write_AIC32X4_reg(AIC32X4_IFACE1, 0b00110000); // I2S, 32bit depth, BCLK+WCLK as input, DOUT enabled
-    write_AIC32X4_reg(AIC32X4_IFACE2, 0x00); // no BCLK offset
-    write_AIC32X4_reg(AIC32X4_CLKMUX, 0b00000000); // MCLK is codec clock in, TODO: test maybe PLL clock if issues
-    write_AIC32X4_reg(AIC32X4_PLLPR, 0x00); // PLL power down
+    boot_mark(0, "cfg_codec() entry");
+
+    // ══════════════════════════════════════════════════════════════════
+    //  POP-FREE INIT v9 (FINAL)
+    // ══════════════════════════════════════════════════════════════════
+    //
+    // TBD-16 Standalone codec power topology (from schematics):
+    //   DVDD, AVDD, LDOIN, LDO_SELECT all → +3.3V_A (TPS7A2033)
+    //   LDO_SELECT = HIGH → internal LDO BYPASSED
+    //   HPL/HPR → NC (not connected)
+    //   LOL/LOR → MCP6004 buffer → CN13 (DC-coupled, no blocking caps!)
+    //
+    // Root cause: Output driver power-on steps LOL/LOR from 0V→CM.
+    //   HEADSTART de-pop is ineffective on this board: output sees
+    //   ~5pF MCP6004 input, so RC τ ≈ 50ps — ramp completes in ns
+    //   regardless of register setting (designed for headphone loads).
+    //   Staggering LOL/LOR causes TWO pops — worse than simultaneous.
+    //
+    // v9 = the best software can do on DC-coupled outputs.
+    //   HEADSTART 0x66 = 8TC + medium step (0x6C slowest step was -13.7, worse)
+    //
+    // Measurement history:
+    //   baseline: -11.3 dBFS (original code, CMMODE+PWRCFG)
+    //   v9:  -17.3 dBFS — hw-aware, no PWRCFG/CMMODE
+    //   v9x-stagger: -10.8/-18.1 dBFS — WORSE (two pops!)
+    //   v9x-0x6C: -13.7 dBFS — slowest step worse than medium
+    //   v12: -21.1 to -29.9 dBFS (avg -24.5, 7 runs) — REFPOWERUP=0x04 (force+slow) ← BEST
+    //   v13: -8.7/-9.8/-16.7 dBFS — 0x07(force+120ms) + drivers during ramp — WORSE
+    //   v14: -12.7/-8.9/-11.7 dBFS — 0x07(force+120ms) + drivers after 200ms — WORSE
+    //   → Slow ramp speed is the dominant factor; driver timing irrelevant
+    // ══════════════════════════════════════════════════════════════════
+    ESP_LOGI(TAG, "AIC3254 pop-free init v12");
+
+    // ── 1. CONFIRM CLEAN STATE ──
+    boot_mark(1, "ensure outputs off");
+    write_AIC32X4_reg(AIC32X4_OUTPWRCTL, 0x00);        // power down ALL output drivers
+    write_AIC32X4_reg(AIC32X4_DACSETUP, 0x00);         // power down DAC
+    write_AIC32X4_reg(AIC32X4_DACMUTE, 0b00001100);    // mute L+R DAC
+    write_AIC32X4_reg(AIC32X4_LOLGAIN, 0b01000000);    // mute LOL
+    write_AIC32X4_reg(AIC32X4_LORGAIN, 0b01000000);    // mute LOR
+    write_AIC32X4_reg(AIC32X4_LOLROUTE, 0x00);         // disconnect routing
+    write_AIC32X4_reg(AIC32X4_LORROUTE, 0x00);
+    write_AIC32X4_reg(AIC32X4_NDAC, 0x01);             // NDAC off
+    write_AIC32X4_reg(AIC32X4_MDAC, 0x02);             // MDAC off
+    write_AIC32X4_reg(AIC32X4_NADC, 0x01);             // NADC off
+    write_AIC32X4_reg(AIC32X4_MADC, 0x02);             // MADC off
+
+    // ── 2. DE-POP + REFERENCE ──
+    // NO PWRCFG write — crude AVDD = clean +3.3V_A on this board
+    // NO CMMODE write — use default bandgap CM (1.35V)
+    boot_mark(2, "HEADSTART(0x66) + LDOCTL + REFPOWERUP(force)");
+    write_AIC32X4_reg(AIC32X4_HEADSTART, 0x66);        // (P1_R20) 8TC + medium step (proven best)
+    write_AIC32X4_reg(AIC32X4_LDOCTL, 0x01);           // (P1_R2) enable analog supply path
+    write_AIC32X4_reg(AIC32X4_REFPOWERUP, 0x04);       // (P1_R123) FORCE ref power-up NOW, slow
+    // v9 bug: 0x01 = "power up when analog blocks powered" → ref only
+    // started at OUTPWRCTL write, so 200ms wait was wasted!
+    // 0x04 = "force power up NOW, slow" → ref settles during our wait
+
+    boot_mark(3, "waiting 200ms for forced reference settle");
+    vTaskDelay(200 / portTICK_PERIOD_MS);
+
+    // ── 3. POWER OUTPUT DRIVERS (simultaneous — staggering causes 2 pops!) ──
+    boot_mark(4, "output driver power on (LOL+LOR simultaneous)");
+    write_AIC32X4_reg(AIC32X4_OUTPWRCTL, 0b00001100);  // (P1_R9) LOL + LOR on
+    // LOL/LOR step 0V→1.35V (softened by HEADSTART de-pop)
+
+    boot_mark(5, "waiting 500ms for output CM settle");
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+
+    // ── 4. CLOCKING ──
+    boot_mark(6, "clocking config");
+    write_AIC32X4_reg(AIC32X4_IFACE1, 0b00110000);     // I2S, 32bit
+    write_AIC32X4_reg(AIC32X4_IFACE2, 0x00);
+    write_AIC32X4_reg(AIC32X4_CLKMUX, 0b00000000);     // MCLK
+    write_AIC32X4_reg(AIC32X4_PLLPR, 0x00);            // PLL off
     write_AIC32X4_reg(AIC32X4_DOSRMSB, 0x00);
-    write_AIC32X4_reg(AIC32X4_DOSRLSB, 0x80); // (P0_R14) set DOSR = 128 decimal or 0x0080 hex
-    write_AIC32X4_reg(AIC32X4_AOSR, 0x80); // (P0_R20) set AOSR = 128 decimal or 0x0080 hex, for decimation filters 1 to 6, ADC Oversampling
-    write_AIC32X4_reg(AIC32X4_NDAC, 0x81); // (P0_R11) power up and set NDAC = 1
-    write_AIC32X4_reg(AIC32X4_MDAC, 0x82); // (P0_R12) power up and set MDAC = 2
-    write_AIC32X4_reg(AIC32X4_NADC, 0x81); // (P0_R18) power up and set NADC = 1
-    write_AIC32X4_reg(AIC32X4_MADC, 0x82); // (P0_R19) power up and set MADC = 2
-    // TODO: DACSPB -> using default
-    // TODO: ADCSPB -> using default
-    //write_16bit_reg(AIC32X4_DACSPB, 0x08); // PRB_P8
+    write_AIC32X4_reg(AIC32X4_DOSRLSB, 0x80);          // DOSR = 128
+    write_AIC32X4_reg(AIC32X4_AOSR, 0x80);             // AOSR = 128
+    write_AIC32X4_reg(AIC32X4_NDAC, 0x81);             // NDAC = 1, on
+    write_AIC32X4_reg(AIC32X4_MDAC, 0x82);             // MDAC = 2, on
+    write_AIC32X4_reg(AIC32X4_NADC, 0x81);             // NADC = 1, on
+    write_AIC32X4_reg(AIC32X4_MADC, 0x82);             // MADC = 2, on
 
-    // DAC routing and power up
-    write_AIC32X4_reg(AIC32X4_LOLROUTE, 0x08);
-    write_AIC32X4_reg(AIC32X4_LORROUTE, 0x08);
-    write_AIC32X4_reg(AIC32X4_HPLROUTE, 0x08);
-    write_AIC32X4_reg(AIC32X4_HPRROUTE, 0x08);
+    // ── 5. DAC MUTED AT MINIMUM VOLUME ──
+    write_AIC32X4_reg(AIC32X4_DACMUTE, 0b00001100);
+    write_AIC32X4_reg(AIC32X4_LDACVOL, 0x81);          // -63.5 dB (minimum)
+    write_AIC32X4_reg(AIC32X4_RDACVOL, 0x81);
+    write_AIC32X4_reg(AIC32X4_DACSETUP, 0b11010100);   // power up DAC (muted)
 
-    write_AIC32X4_reg(AIC32X4_DACMUTE, 0x00); // individual volume control for L/R
-    write_AIC32X4_reg(AIC32X4_LDACVOL, 0x00); // (P0_R65) set left DAC gain to 0dB DIGITAL VOL
-    write_AIC32X4_reg(AIC32X4_RDACVOL, 0x00); // (P0_R66) set right DAC gain to 0dB DIGITAL VOL
-    write_AIC32X4_reg(AIC32X4_DACSETUP, 0b11010100); // (P0_R63) Power up left and right DAC data paths and set channel [0b11010100]
-    write_AIC32X4_reg(AIC32X4_OUTPWRCTL, 0b00001100); // (P1_R9) power up HPL, HPR, LOL and LOR [0b00111100]
-    write_AIC32X4_reg(AIC32X4_HPLGAIN, 0x00); // (P1_R16) unmute HPL, set 0dB gain
-    write_AIC32X4_reg(AIC32X4_HPRGAIN, 0x00); // (P1_R16) unmute HPL, set 0dB gain
+    // ── 6. CONNECT DAC ROUTING ──
+    boot_mark(7, "connecting DAC routing");
+    write_AIC32X4_reg(AIC32X4_LOLROUTE, 0x08);         // left DAC → LOL
+    write_AIC32X4_reg(AIC32X4_LORROUTE, 0x08);         // right DAC → LOR
 
-    // ADC routing and power up
-    write_AIC32X4_reg(AIC32X4_LMICPGAPIN, 0b01000000); // IN1L routed to left MICPGA with 10k
-    write_AIC32X4_reg(AIC32X4_RMICPGAPIN, 0b01000000); // IN1L routed to left MICPGA with 10k
-    write_AIC32X4_reg(AIC32X4_LMICPGANIN, 0b01000000); // (P1_R54) CM is routed to Left MICPGA via CM1L with 10kohm resistance
-    write_AIC32X4_reg(AIC32X4_RMICPGANIN, 0b01000000); // (P1_R57) CM is routed to Right MICPGA via CM1R with 10kohm resistance
-    write_AIC32X4_reg(AIC32X4_LMICPGAVOL, 0x80); // 0dB gain for left MICPGA
-    write_AIC32X4_reg(AIC32X4_RMICPGAVOL, 0x80); // 0dB gain for left MICPGA
+    // ── 7. ADC PATH ──
+    write_AIC32X4_reg(AIC32X4_LMICPGAPIN, 0b01000000);
+    write_AIC32X4_reg(AIC32X4_RMICPGAPIN, 0b01000000);
+    write_AIC32X4_reg(AIC32X4_LMICPGANIN, 0b01000000);
+    write_AIC32X4_reg(AIC32X4_RMICPGANIN, 0b01000000);
+    write_AIC32X4_reg(AIC32X4_LMICPGAVOL, 0x80);
+    write_AIC32X4_reg(AIC32X4_RMICPGAVOL, 0x80);
+    write_AIC32X4_reg(AIC32X4_ADCPRB, 0x01);
     ADCHighPassEnable();
-    write_AIC32X4_reg(AIC32X4_ADCSETUP, 0b11000000); // (P0_R81) power up left and right ADCs
-    write_AIC32X4_reg(AIC32X4_ADCFGA, 0x00); // (P0_R82) unmute left and right ADCs
+    write_AIC32X4_reg(AIC32X4_ADCSETUP, 0b11000000);
+    write_AIC32X4_reg(AIC32X4_ADCFGA, 0x00);
 
-    // unmute output drivers
-    write_AIC32X4_reg(AIC32X4_LOLGAIN, 0x06); // (P1_R18) unmute LOL, set 6dB gain
-    write_AIC32X4_reg(AIC32X4_LORGAIN, 0x06); // (P1_R18 ) unmute LOL, set 6dB gain
+    // ── 8. UNMUTE ANALOG OUTPUTS ──
+    boot_mark(8, "unmuting analog outputs");
+    write_AIC32X4_reg(AIC32X4_LOLGAIN, 0x06);          // unmute LOL, +6 dB analog
+    write_AIC32X4_reg(AIC32X4_LORGAIN, 0x06);          // unmute LOR, +6 dB analog
+
+    // ── 9. GRADUAL DAC VOLUME FADE-IN ──
+    write_AIC32X4_reg(AIC32X4_DACMUTE, 0x00);          // unmute DAC
+    boot_mark(9, "DAC volume fade-in");
+    static const uint8_t fade_ramp[] = {
+        0x89, 0x91, 0x99, 0xA1, 0xA9, 0xB1, 0xB9, 0xC1,
+        0xC9, 0xD1, 0xD9, 0xE1, 0xE9, 0xF1, 0xF9, 0x00
+    };
+    for (int i = 0; i < 16; i++) {
+        write_AIC32X4_reg(AIC32X4_LDACVOL, fade_ramp[i]);
+        write_AIC32X4_reg(AIC32X4_RDACVOL, fade_ramp[i]);
+        vTaskDelay(1);
+    }
+
+    boot_mark(10, "init complete");
+    ESP_LOGI(TAG, "AIC3254 pop-free init v12 complete");
 }
 
 void Codec::SetOutputLevels(const uint32_t left, const uint32_t right) {
@@ -318,7 +405,7 @@ void Codec::SetOutputLevels(const uint32_t left, const uint32_t right) {
 static void cfg_i2s() {
     ESP_LOGI(TAG, "cfg codec i2s");
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_PORT_NUM, I2S_ROLE_MASTER);
-    chan_cfg.auto_clear = false;
+    chan_cfg.auto_clear = true;   // zero DMA buffers when no data written — prevents garbage clicks on startup
     chan_cfg.dma_desc_num = 4;
     chan_cfg.dma_frame_num = 32;
 
@@ -659,12 +746,21 @@ void IRAM_ATTR Codec::WriteBuffer(float *buf, uint32_t sz) {
 #endif
 
 void Codec::InitCodec() {
-    cfg_i2c();
-    identify();
-    SetOutputLevels(0, 0);
-    cfg_i2s();
-    cfg_codec();
-    SetOutputLevels(58, 58);
+    cfg_i2c();                     // 1. I2C bus ready
+    identify();                    // 2. Detect AIC3254 on bus (no muting — reset wipes it)
+    cfg_i2s();                     // 3. Start I2S + MCLK (codec needs MCLK for de-pop timing)
+
+    // 3b. Pre-fill I2S TX DMA with silence to guarantee zeros on bus
+    //     before codec DAC starts processing. auto_clear=true helps,
+    //     but explicit write ensures all DMA descriptors have zeros.
+    {
+        static int32_t silence[64] = {0};  // 32 stereo frames
+        size_t nb;
+        i2s_channel_write(tx_handle, silence, sizeof(silence), &nb, 100);
+    }
+
+    cfg_codec();                   // 4. Full pop-free config (mute→settle→fade-in)
+    SetOutputLevels(58, 58);       // 5. Set final volume (0dB default) after everything settled
 }
 
 // from pg. 26 of https://www.ti.com/lit/an/slaa408a/slaa408a.pdf?ts=1766827966822&ref_url=https%253A%252F%252Fwww.ti.com%252Fproduct%252FTLV320AIC3254
@@ -682,7 +778,9 @@ void Codec::ADCHighPassEnable() {
     // α = exp(-2π·fc/fs) ≈ 0.999472
     // N0 = +1.0 * 2^23 = 0x7FFFFF (8388607)
     // N1 = -1.0 * 2^23 = 0x800001 (-8388607 in two's complement, 24-bit)
-    // D1 = α * 2^23 ≈ 0.999472 * 8388608 ≈ 0x7FB0FE (8384190)
+    // D1 = α * 2^23 ≈ 0.999473 * 8388608 ≈ 0x7FEEB9 (8384185)
+    // NOTE: Previous value 0x7FB0FE was incorrect — gave ~17Hz cutoff, not 3.7Hz.
+    //        Corrected to 0x7FEEB9 for actual 3.7Hz DC-blocking cutoff.
 
     // Switch to page 8 for left ADC channel coefficients
     write_reg(AIC32X4_PSEL, 8);
@@ -700,8 +798,8 @@ void Codec::ADCHighPassEnable() {
 
     // Left channel: C6 (D1) at Page 8, Reg 32,33,34
     write_reg(32, 0x7F);  // D1 MSB
-    write_reg(33, 0xB0);  // D1 MID
-    write_reg(34, 0xFE);  // D1 LSB (0x7FB0FE ≈ 8384190)
+    write_reg(33, 0xEE);  // D1 MID
+    write_reg(34, 0xB9);  // D1 LSB (0x7FEEB9 ≈ 8384185, α=0.999473, fc≈3.7Hz)
 
     // Switch to page 9 for right ADC channel coefficients
     write_reg(AIC32X4_PSEL, 9);
@@ -719,8 +817,8 @@ void Codec::ADCHighPassEnable() {
 
     // Right channel: C38 (D1) at Page 9, Reg 40,41,42
     write_reg(40, 0x7F);  // D1 MSB
-    write_reg(41, 0xB0);  // D1 MID
-    write_reg(42, 0xFE);  // D1 LSB
+    write_reg(41, 0xEE);  // D1 MID
+    write_reg(42, 0xB9);  // D1 LSB (0x7FEEB9, matches left channel)
 
     // Switch back to page 0
     write_reg(AIC32X4_PSEL, 0);

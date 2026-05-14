@@ -1,32 +1,31 @@
 /***************
-CTAG TBD >>to be determined<< is an open source eurorack synthesizer module.
+TBD-16 — dadamachines WebUI & REST API
 
-A project conceived within the Creative Technologies Arbeitsgruppe of
-Kiel University of Applied Sciences: https://www.creative-technologies.de
+(c) 2024-2026 Johannes Elias Lohbihler for dadamachines.
 
-(c) 2020 by Robert Manzke. All rights reserved.
+Licensed under the GNU General Public License (GPL 3.0):
+https://www.gnu.org/licenses/gpl-3.0.txt
 
-The CTAG TBD software is licensed under the GNU General Public License
-(GPL 3.0), available here: https://www.gnu.org/licenses/gpl-3.0.txt
+A commercial licence is available — contact https://dadamachines.com/contact/
 
-The CTAG TBD hardware design is released under the Creative Commons
-Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0).
-Details here: https://creativecommons.org/licenses/by-nc-sa/4.0/
+Provided "as is" without any express or implied warranties.
+See LICENSE in the repository root for full terms.
 
-CTAG TBD is provided "as is" without any express or implied warranties.
-
-License and copyright details for specific submodules are included in their
-respective component folders / files if different from this license.
+SPDX-License-Identifier: GPL-3.0-only
 ***************/
 
-
 #include "FavoritesModel.hpp"
+#include "StorageOverlay.hpp"
 #include "rapidjson/filereadstream.h"
 #include "rapidjson/writer.h"
 #include "rapidjson/stringbuffer.h"
 
+static std::string favoritesPath() {
+    return CTAG::STORAGE::userPath() + "/" + CTAG::STORAGE::DIR_CONFIG + "/favorites.json";
+}
+
 string CTAG::FAV::FavoritesModel::GetAllFavorites() {
-    loadJSON(m, CTAG::RESOURCES::sdcardRoot + "/data/favs.jsn");
+    loadJSON(m, favoritesPath());
     json.Clear();
     Writer<StringBuffer> writer(json);
     if (!m.IsArray()) return "";
@@ -35,7 +34,7 @@ string CTAG::FAV::FavoritesModel::GetAllFavorites() {
 }
 
 string CTAG::FAV::FavoritesModel::GetFavorite(int const &i) {
-    loadJSON(m, CTAG::RESOURCES::sdcardRoot + "/data/favs.jsn");
+    loadJSON(m, favoritesPath());
     json.Clear();
     Writer<StringBuffer> writer(json);
     if (!m.IsArray()) return "";
@@ -45,21 +44,21 @@ string CTAG::FAV::FavoritesModel::GetFavorite(int const &i) {
 }
 
 string CTAG::FAV::FavoritesModel::GetFavoriteName(int const &i) {
-    loadJSON(m, CTAG::RESOURCES::sdcardRoot + "/data/favs.jsn");
+    loadJSON(m, favoritesPath());
     if (!m.IsArray()) return "";
     Value o = m[i].GetObject();
     return o["name"].GetString();
 }
 
 string CTAG::FAV::FavoritesModel::GetFavoriteUString(int const &i) {
-    loadJSON(m, CTAG::RESOURCES::sdcardRoot + "/data/favs.jsn");
+    loadJSON(m, favoritesPath());
     if (!m.IsArray()) return "";
     Value o = m[i].GetObject();
     return o["ustring"].GetString();
 }
 
 string CTAG::FAV::FavoritesModel::GetFavoritePluginID(int const &i, const int &channel) {
-    loadJSON(m, CTAG::RESOURCES::sdcardRoot + "/data/favs.jsn");
+    loadJSON(m, favoritesPath());
     if (!m.IsArray()) return "";
     if (!m[i].IsObject()) return "";
     string key {"plug_0"};
@@ -69,7 +68,7 @@ string CTAG::FAV::FavoritesModel::GetFavoritePluginID(int const &i, const int &c
 }
 
 int CTAG::FAV::FavoritesModel::GetFavoritePreset(int const &i, const int &channel) {
-    loadJSON(m, CTAG::RESOURCES::sdcardRoot + "/data/favs.jsn");
+    loadJSON(m, favoritesPath());
     if (!m.IsArray()) return 0;
     string key {"pre_0"};
     if(channel == 1) key = string("pre_1");
@@ -78,10 +77,10 @@ int CTAG::FAV::FavoritesModel::GetFavoritePreset(int const &i, const int &channe
 }
 
 void CTAG::FAV::FavoritesModel::SetFavorite(int const &id, const string &data) {
-    loadJSON(m, CTAG::RESOURCES::sdcardRoot + "/data/favs.jsn");
+    loadJSON(m, favoritesPath());
     if (!m.IsArray()) return;
     Document d;
     d.Parse(data);
     m[id] = d.Move();
-    storeJSON(m, CTAG::RESOURCES::sdcardRoot + "/data/favs.jsn");
+    storeJSON(m, favoritesPath());
 }

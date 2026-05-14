@@ -1,0 +1,96 @@
+# CI: Build-check firmware on PRs and on pushes to dada-tbd-master.
+# Only triggers when firmware-relevant files change — docs-only commits
+# do NOT trigger a firmware build.
+name: CI
+
+on:
+  # External contributors PR against `staging` (the community intake branch);
+  # maintainer-driven snapshot updates push directly to `dada-tbd-master`.
+  # CI runs compile-checks on both.
+  pull_request:
+    branches: [dada-tbd-master, staging]
+    paths:
+      - "main/**"
+      - "components/**"
+      - "CMakeLists.txt"
+      - "sdkconfig"
+      - "sdkconfig.defaults"
+      - "sdkconfig.defaults.*"
+      - "partitions_example.csv"
+      - "partitions_no_sd.csv"
+      - "idf-patches/**"
+      - "sdcard_image/**"
+      - "create_sd_archive.sh"
+      - "create_unified_p4_firmware.sh"
+      - ".github/workflows/build-firmware.yml"
+      - ".github/workflows/ci.yml"
+
+  push:
+    branches: [dada-tbd-master, staging]
+    paths:
+      - "main/**"
+      - "components/**"
+      - "CMakeLists.txt"
+      - "sdkconfig"
+      - "sdkconfig.defaults"
+      - "sdkconfig.defaults.*"
+      - "partitions_example.csv"
+      - "partitions_no_sd.csv"
+      - "idf-patches/**"
+      - "sdcard_image/**"
+      - "create_sd_archive.sh"
+      - "create_unified_p4_firmware.sh"
+      - ".github/workflows/build-firmware.yml"
+      - ".github/workflows/ci.yml"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Full build-check for TBD-16 (Config D — the release configuration) ──
+  build-check:
+    uses: ./.github/workflows/build-firmware.yml
+    with:
+      build_name: ci-${{ github.sha }}
+
+  # ── Compile-check alternate hardware configurations ──
+  # Verifies that the non-shipping hardware configs still compile.
+  # These are lightweight builds (no SD archive, no unified image).
+  #
+  # Shipped today (rev1 + rev3.1): Config D — SD card + RP2350 (the
+  # `build-check` job above). Configs A and C are kept here as code-hygiene
+  # smoke tests; Config B (tbd-rp2350-only — RP2350 with NO SD card) is
+  # NOT a shipping variant and its tight no-SD partition layout currently
+  # overflows when the full GrooveBoxRack feature set is enabled, so we
+  # don't gate the build on it. Re-add the matrix entry if Config B ever
+  # becomes a shipping target — and grow `ota_0` in `partitions_no_sd.csv`
+  # at the same time.
+  compile-check-configs:
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v5.5.3
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: tbd-simple
+            overlay: sdkconfig.defaults.tbd-simple
+          - name: tbd-sd-only
+            overlay: sdkconfig.defaults.tbd-sd-only
+    name: "compile-check (${{ matrix.name }})"
+    steps:
+      - name: Install system dependencies
+        run: apt-get update && apt-get install -y xxhash
+
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Build ${{ matrix.name }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          . $IDF_PATH/export.sh
+          idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;${{ matrix.overlay }}" build

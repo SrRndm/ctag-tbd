@@ -7,167 +7,1216 @@ CTAG TBD >>to be determined<< is an open source eurorack synthesizer module.
 A project conceived within the Creative Technologies Arbeitsgruppe of
 Kiel University of Applied Sciences: https://www.creative-technologies.de
 
-(c) 2020 by Robert Manzke. All rights reserved.
+(c) 2020,2026 by Robert Manzke. All rights reserved.
+Modulation Simulation UI rewrite (c) 2026 Johannes Elias Lohbihler.
 
 The CTAG TBD software is licensed under the GNU General Public License
 (GPL 3.0), available here: https://www.gnu.org/licenses/gpl-3.0.txt
 
-The CTAG TBD hardware design is released under the Creative Commons
-Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0).
-Details here: https://creativecommons.org/licenses/by-nc-sa/4.0/
-
 CTAG TBD is provided "as is" without any express or implied warranties.
-
-License and copyright details for specific submodules are included in their
-respective component folders / files if different from this license.
 ***************/
 -->
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
-    <meta http-equiv="Pragma" content="no-cache"/>
-    <meta http-equiv="Expires" content="-1"/>
-    <link rel="stylesheet" href="/css/onsenui-core.min.css">
-    <link rel="stylesheet" href="/css/onsen-css-c.min.css">
-    <script src="/js/onsenui.min.js"></script>
-    <script src="/js/jquery-3.4.1.min.js"></script>
-    <script src="/js/ajaxq.js"></script>
-    <title>TBD Test UI</title>
+    <title>TBD Simulator — Control</title>
+    <!-- webaudio-controls (shipped with the WebUI): gives us a real <webaudio-keyboard>.
+         useMidi:0 so the lib doesn't ask for hardware-MIDI access. -->
+    <script>window.WebAudioControlsOptions = { useMidi: 0, tooltip: 0 };</script>
+    <script src="/js/webaudio-controls.js"></script>
+    <style>
+        :root {
+            --bg: #1a1a1e;
+            --surface: #232328;
+            --surface-hi: #2c2c32;
+            --border: #3a3a42;
+            --text: #e0e0e0;
+            --text-dim: #888;
+            --accent: #5b9bd5;
+            --accent-dim: #3a6a9a;
+            --trig-color: #e8a04c;
+            --cv-color: #6cc070;
+            --pot-color: #c070c0;
+            --radius: 6px;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            padding: 16px;
+            max-width: 720px;
+            margin: 0 auto;
+        }
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 0 16px;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 16px;
+        }
+        header h1 {
+            font-size: 16px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+        header a {
+            color: var(--accent);
+            text-decoration: none;
+            font-size: 13px;
+        }
+        header a:hover { text-decoration: underline; }
+
+        .section-label {
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            margin: 16px 0 8px;
+        }
+        .section-label.trig { color: var(--trig-color); }
+        .section-label.cv   { color: var(--cv-color); }
+        .section-label.pot  { color: var(--pot-color); }
+
+        .ctrl-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 12px 16px;
+            margin-bottom: 8px;
+        }
+        .ctrl-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+        .ctrl-name {
+            font-size: 14px;
+            font-weight: 600;
+        }
+        .ctrl-value-readout {
+            font-size: 13px;
+            font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+            color: var(--text-dim);
+            min-width: 50px;
+            text-align: right;
+        }
+        .ctrl-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .ctrl-row label {
+            font-size: 12px;
+            color: var(--text-dim);
+            min-width: 50px;
+        }
+        .ctrl-row select {
+            background: var(--surface-hi);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 4px 8px;
+            font-size: 13px;
+            outline: none;
+            cursor: pointer;
+        }
+        .ctrl-row select:focus {
+            border-color: var(--accent);
+        }
+
+        /* Range slider styling */
+        input[type="range"] {
+            -webkit-appearance: none;
+            appearance: none;
+            flex: 1;
+            height: 6px;
+            border-radius: 3px;
+            background: var(--surface-hi);
+            outline: none;
+            cursor: pointer;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: var(--accent);
+            border: 2px solid var(--bg);
+            cursor: pointer;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+        }
+        input[type="range"]::-webkit-slider-thumb:hover {
+            background: #6db0eb;
+        }
+        input[type="range"]:active::-webkit-slider-thumb {
+            transform: scale(1.15);
+        }
+
+        /* Trigger buttons */
+        .trig-btn-row {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+        }
+        .trig-btn {
+            padding: 6px 16px;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            background: var(--surface-hi);
+            color: var(--text);
+            font-size: 13px;
+            cursor: pointer;
+            user-select: none;
+            transition: background 0.1s, border-color 0.1s;
+        }
+        .trig-btn:hover {
+            border-color: var(--trig-color);
+        }
+        .trig-btn:active, .trig-btn.active {
+            background: var(--trig-color);
+            color: #000;
+            border-color: var(--trig-color);
+        }
+
+        .header-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            margin-left: 14px;
+            font-size: 11px;
+            color: var(--text-dim);
+        }
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #666;
+        }
+        .status-dot.connected { background: var(--cv-color); }
+        .status-dot.error { background: #e05050; }
+
+        /* MIDI note keyboard + step sequencer */
+        .section-label.midi { color: #d57bb5; }
+        .section-label.seq  { color: #d5b35b; }
+        .midi-hint { font-size: 12px; color: var(--text-dim); margin: 4px 0 10px; line-height: 1.5; }
+
+        /* Octave labels under the on-screen keyboard so users can immediately
+           see where each C sits.  The webaudio-keyboard widget always opens
+           with a C as its leftmost note, but the C's right half is partly
+           covered by the C# black key so the C looks visually narrow — a
+           label removes the ambiguity. */
+        .kbd-wrapper { position: relative; display: inline-block; }
+        .kbd-octave-labels {
+            position: absolute;
+            left: 0; right: 0; bottom: 5px;
+            height: 14px;
+            pointer-events: none;
+            font-size: 10px;
+            color: #6b6b75;
+            font-family: 'SF Mono','Menlo','Consolas',monospace;
+        }
+        .kbd-octave-labels span {
+            position: absolute;
+            transform: translateX(-50%);
+            line-height: 14px;
+            white-space: nowrap;
+        }
+        .key-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
+        .key-btn {
+            min-width: 40px; padding: 14px 8px; border: 1px solid var(--border);
+            border-radius: 4px; background: var(--surface-hi); color: var(--text);
+            font-size: 12px; font-family: 'SF Mono','Menlo','Consolas',monospace;
+            cursor: pointer; user-select: none; transition: background 0.08s, border-color 0.08s;
+        }
+        .key-btn.sharp { background: #18181c; color: var(--text-dim); }
+        .key-btn:hover { border-color: #d57bb5; }
+        .key-btn:active, .key-btn.active { background: #d57bb5; color: #000; border-color: #d57bb5; }
+
+        .seq-transport { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+        .seq-btn {
+            padding: 6px 14px; border: 1px solid var(--border); border-radius: 4px;
+            background: var(--surface-hi); color: var(--text); font-size: 13px; cursor: pointer; user-select: none;
+        }
+        .seq-btn:hover { border-color: #d5b35b; }
+        .seq-btn.play.active { background: var(--cv-color); color: #000; border-color: var(--cv-color); }
+        .seq-grid { display: grid; grid-template-columns: 92px repeat(16, 1fr); gap: 3px; user-select: none; touch-action: none; }
+        .seq-rowlabel {
+            font-size: 11px; color: var(--text-dim); display: flex; align-items: center; gap: 5px;
+            font-family: 'SF Mono','Menlo','Consolas',monospace; white-space: nowrap; overflow: hidden;
+        }
+        .seq-rowlabel .seq-rowname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+        /* Per-track mute toggle inside the row label.  Click → seqMute[t] flips,
+           the row's cells get .row-muted (dimmed), and seqFireStep skips that
+           track until you click again.  Persistent across Play/Stop. */
+        .seq-mute-btn {
+            flex: 0 0 auto;
+            width: 18px; height: 18px; padding: 0; line-height: 18px;
+            border: 1px solid var(--border); border-radius: 3px;
+            background: var(--surface-hi); color: var(--text-dim);
+            font-size: 10px; font-weight: 700; font-family: inherit;
+            cursor: pointer; user-select: none; transition: background 0.08s, border-color 0.08s, color 0.08s;
+        }
+        .seq-mute-btn:hover { border-color: #e05050; color: var(--text); }
+        .seq-mute-btn.on    { background: #e05050; border-color: #e05050; color: #000; }
+        .seq-cell {
+            aspect-ratio: 1 / 1; min-height: 26px; border: 1px solid var(--border); border-radius: 3px;
+            background: var(--surface-hi); cursor: pointer; transition: background 0.06s, opacity 0.08s;
+        }
+        .seq-cell:hover { border-color: #6c6c74; }
+        .seq-cell.beat { background: #303036; }
+        .seq-cell.on { background: #d5b35b; border-color: #d5b35b; }
+        .seq-cell.on.accent { background: #f4d050; border-color: #fff; box-shadow: inset 0 0 0 2px #fff8; }
+        .seq-cell.playcol { outline: 2px solid var(--accent); outline-offset: -1px; }
+        .seq-cell.row-muted { opacity: 0.28; }
+        .seq-rowlabel.muted .seq-rowname { color: #e05050; text-decoration: line-through; }
+        .seq-colhead { font-size: 9px; color: var(--text-dim); text-align: center; }
+
+        /* WebMIDI input section — live activity LED + status pill */
+        .midi-status {
+            display: inline-flex; align-items: center; gap: 6px;
+            font-size: 11px; color: var(--text-dim);
+            padding: 3px 9px; border-radius: 999px;
+            background: var(--surface-hi); border: 1px solid var(--border);
+            font-family: 'SF Mono','Menlo','Consolas',monospace;
+        }
+        .midi-status.connected { color: #5ed080; border-color: #2e6040; }
+        .midi-status.error     { color: #e05050; border-color: #6e2828; }
+        .midi-led {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: #404048; transition: background 0.05s, box-shadow 0.05s;
+        }
+        .midi-led.active { background: #d5b35b; box-shadow: 0 0 6px #d5b35b; }
+        .midi-led.connected { background: #5ed080; }
+        .midi-input-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+        .midi-input-row label { font-size: 12px; color: var(--text-dim); min-width: 80px; }
+        .midi-input-row select { flex: 1; min-width: 200px; max-width: 400px; }
+        /* (i) info toggle — small circular button next to the WebMIDI status pill */
+        .midi-info-btn {
+            width: 22px; height: 22px; padding: 0; line-height: 20px;
+            border-radius: 50%; border: 1px solid var(--border);
+            background: var(--surface-hi); color: var(--text-dim);
+            font-size: 13px; cursor: pointer; user-select: none;
+            display: inline-flex; align-items: center; justify-content: center;
+            transition: border-color 0.08s, color 0.08s;
+        }
+        .midi-info-btn:hover  { border-color: #d57bb5; color: var(--text); }
+        .midi-info-btn.active { border-color: #d57bb5; color: var(--text); background: rgba(213,123,181,0.10); }
+        .midi-help {
+            font-size: 12px; color: var(--text-dim); line-height: 1.55;
+            padding: 10px 12px;
+            background: rgba(213,123,181,0.06);
+            border: 1px solid #3a2a36;
+            border-radius: var(--radius);
+            margin-bottom: 10px;
+        }
+        .midi-help code { font-size: 11px; }
+
+        /* collapsible sections (<details class="sect">) */
+        details.sect { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 8px; }
+        details.sect > summary {
+            padding: 11px 14px; font-size: 13px; font-weight: 600; cursor: pointer; user-select: none;
+            list-style: none; display: flex; align-items: center; gap: 8px;
+            flex-wrap: nowrap; white-space: nowrap;
+        }
+        details.sect > summary::-webkit-details-marker { display: none; }
+        details.sect > summary::before { content: '▸'; color: var(--text-dim); font-size: 11px; transition: transform .1s; }
+        details.sect[open] > summary::before { transform: rotate(90deg); }
+        /* subtitle takes whatever horizontal room is left; truncates if cramped.
+           Title text stays on one line — never wraps because of a long subtitle. */
+        details.sect > summary .sect-sub {
+            font-weight: 400; color: var(--text-dim); font-size: 11px;
+            flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+        }
+        details.sect > .sect-body { padding: 4px 14px 14px; }
+
+        /* "About this tab" cards — a light-theme tip box that stands out from
+           the surrounding dark UI; intended to be readable on first visit, so
+           it's auto-opened once per tab (see init JS at bottom) and then
+           collapsed by default on subsequent visits. The user can always
+           re-open the chevron to re-read the quickstart.
+           IMPORTANT: the light styling applies only when [open] — when
+           collapsed, the card inherits the surrounding dark .sect styling so
+           it doesn't clash with the rest of the dark UI. */
+        details.sect.intro[open] {
+            background: #f5efe5;          /* warm off-white */
+            border: 1px solid #d8cdb8;
+            color: #1a1a1a;
+        }
+        details.sect.intro[open] > summary           { color: #2a2a2a; font-size: 14px; }
+        details.sect.intro[open] > summary::before   { color: #6a6256; }
+        details.sect.intro[open] > summary .sect-sub { color: #6a6256; font-size: 12px; }
+        details.sect.intro[open] > .sect-body {
+            font-size: 14px;
+            line-height: 1.65;
+            color: #1a1a1a;
+            padding: 6px 18px 18px;
+        }
+        details.sect.intro[open] > .sect-body b { color: #000; font-weight: 600; }
+        details.sect.intro[open] > .sect-body code {
+            background: rgba(0,0,0,0.07);
+            color: #1a1a1a;
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 13px;
+        }
+
+        /* legacy .tab-intro class — kept for any callers but now a no-op,
+           because .intro on the parent details takes precedence */
+        .tab-intro { font-size: 12px; color: var(--text-dim); line-height: 1.55; margin-bottom: 12px; }
+        .tab-intro b { color: var(--text); }
+        .vel-slider { flex: 0 1 140px; }
+
+        /* top-level tabs */
+        .tabbar { display: flex; gap: 4px; margin-bottom: 14px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+        .tab {
+            padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer; user-select: none;
+            color: var(--text-dim); border: 1px solid transparent; border-bottom: none;
+            border-radius: 6px 6px 0 0; margin-bottom: -1px;
+        }
+        .tab:hover { color: var(--text); }
+        .tab.active { color: var(--text); background: var(--surface); border-color: var(--border); }
+        .tabpane { display: none; }
+        .tabpane.active { display: block; }
+    </style>
 </head>
 <body>
-<ons-navigator swipeable id="myNavigator" page="main.html"></ons-navigator>
-</ons-navigator>
+    <header>
+        <h1>TBD Simulator — Control
+            <span class="header-status">
+                <span class="status-dot" id="status-dot"></span>
+                <span id="status-text">Connecting…</span>
+            </span>
+        </h1>
+        <a href="/" target="_blank" rel="noopener">Open WebUI ↗</a>
+    </header>
 
-<template id="main.html">
-    <ons-page id="main">
-        <ons-toolbar>
-            <div class="center">CTAG-TBD-SIM</div>
-        </ons-toolbar>
-        <ons-list>
-            <ons-list-header>TRIG0</ons-list-header>
-            <ons-list-item>
-                <ons-select>
-                    <select id="mode0" onchange="sendAllData()">
-                        <option value="0">Manual</option>
-                        <option value="1">Pulse train</option>
-                    </select>
-                </ons-select>
-            </ons-list-item>
-            <ons-list-item>
-                Frequency/manual:<ons-range oninput="sendAllData()" style="margin-left: 2em" id="value0" min="0" max="4095" value="0"></ons-range>
-            </ons-list-item>
-        </ons-list>
-        <ons-list>
-            <ons-list-header>TRIG1</ons-list-header>
-            <ons-list-item>
-                <ons-select>
-                    <select id="mode1" onchange="sendAllData()">
-                        <option value="0">Manual</option>
-                        <option value="1">Pulse train</option>
-                    </select>
-                </ons-select>
-            </ons-list-item>
-            <ons-list-item>
-                Frequency/manual:<ons-range oninput="sendAllData()" style="margin-left: 2em" id="value1" min="0" max="4095" value="0"></ons-range>
-            </ons-list-item>
-        </ons-list>
-        <ons-list>
-            <ons-list-header>CV0</ons-list-header>
-            <ons-list-item>
-                <ons-select>
-                    <select id="mode2" onchange="sendAllData()">
-                        <option value="0">Manual</option>
-                        <option value="1">Pulse train</option>
-                        <option value="2">Sine wave unipolar</option>
-                        <option value="3">Sine wave bipolar</option>
-                        <option value="4">Steps -5:5:1</option>
-                    </select>
-                </ons-select>
-            </ons-list-item>
-            <ons-list-item>
-                Frequency/manual:<ons-range oninput="sendAllData()" style="margin-left: 2em" id="value2" min="0" max="4095" value="0"></ons-range>
-            </ons-list-item>
-        </ons-list>
-        <ons-list>
-            <ons-list-header>CV1</ons-list-header>
-            <ons-list-item>
-                <ons-select>
-                    <select id="mode3" onchange="sendAllData()">
-                        <option value="0">Manual</option>
-                        <option value="1">Pulse train</option>
-                        <option value="2">Sine wave unipolar</option>
-                        <option value="3">Sine wave bipolar</option>
-                        <option value="4">Steps -5:5:1</option>
-                    </select>
-                </ons-select>
-            </ons-list-item>
-            <ons-list-item>
-                Frequency/manual:<ons-range oninput="sendAllData()" style="margin-left: 2em" id="value3" min="0" max="4095" value="0"></ons-range>
-            </ons-list-item>
-        </ons-list>
-        <ons-list>
-            <ons-list-header>POT0</ons-list-header>
-            <ons-list-item>
-                <ons-select>
-                    <select id="mode4" onchange="sendAllData()">
-                        <option value="0">Manual</option>
-                        <option value="1">Pulse train</option>
-                        <option value="2">Sine wave unipolar</option>
-                        <option value="3">Sine wave bipolar</option>
-                        <option value="4">Steps -5:5:1</option>
-                    </select>
-                </ons-select>
-            </ons-list-item>
-            <ons-list-item>
-                Frequency/manual:<ons-range oninput="sendAllData()" style="margin-left: 2em" id="value4" min="0" max="4095" value="0"></ons-range>
-            </ons-list-item>
-        </ons-list>
-        <ons-list>
-            <ons-list-header>POT1</ons-list-header>
-            <ons-list-item>
-                <ons-select>
-                    <select id="mode5" onchange="sendAllData()">
-                        <option value="0">Manual</option>
-                        <option value="1">Pulse train</option>
-                        <option value="2">Sine wave unipolar</option>
-                        <option value="3">Sine wave bipolar</option>
-                        <option value="4">Steps -5:5:1</option>
-                    </select>
-                </ons-select>
-            </ons-list-item>
-            <ons-list-item>
-                Frequency/manual:<ons-range oninput="sendAllData()" style="margin-left: 2em" id="value5" min="0" max="4095" value="0"></ons-range>
-            </ons-list-item>
-        </ons-list>
-        <script>
-            ons.getScriptPage().onInit = function () {
-                $.getq('myq', 'ctrl-get',
-                    data => {
-                        if(typeof data == 'string') data = JSON.parse(data);
-                        for(let i=0;i<6;i++){
-                            $('#mode'+i).val(data.mode[i]);
-                            $('#value'+i).val(data.value[i]);
-                        }
-                    }
-                );
-                this.onShow = function () {
-                    //console.log('Main');
-                };
-            };
-            function sendAllData(){
-                let allData = {mode:[], value:[]};
-                for(let i=0;i<6;i++){
-                    allData.mode.push($('#mode'+i).val());
-                    allData.value.push($('#value'+i).val());
+    <div class="tabbar">
+        <div class="tab active" data-tab="tab-gbr" onclick="showTab('tab-gbr')">GrooveBoxRack (MIDI)</div>
+        <div class="tab" data-tab="tab-eurorack" onclick="showTab('tab-eurorack')">Legacy / Eurorack plugins (CV / Trig / Pot)</div>
+    </div>
+
+    <!-- ============ LEGACY / EURORACK PLUGINS — the original ctag-tbd ctagSoundProcessor plugins ============ -->
+    <div id="tab-eurorack" class="tabpane">
+
+    <details class="sect intro" data-intro-key="eurorack">
+        <summary>About this tab <span class="sect-sub">— the legacy ctag-tbd plugins (Eurorack-style: CV / Trig / Pot, no MIDI)</span></summary>
+        <div class="sect-body">
+            The TBD's hardware modulation inputs: <b>4 CV inputs</b>, <b>2 trigger/gate inputs</b>, and the
+            <b>2 front-panel pots</b>. <b>All the original ctag-tbd plugins are Eurorack-style and respond
+            only to these</b> — they have no MIDI input. You wire <i>which</i> control drives <i>which</i> plugin
+            parameter from the main WebUI (the small dropdown next to each parameter), exactly like on the
+            hardware module. So: load a plugin, map a parameter to CV0 / TRIG0 / POT0…, then drive it from here.
+            (The TBD-16's <code>GrooveBoxRack</code> is the exception — see the other tab.)
+        </div>
+    </details>
+
+    <div class="section-label trig">Triggers</div>
+    <div class="ctrl-card" data-index="0">
+        <div class="ctrl-header">
+            <span class="ctrl-name">TRIG 0</span>
+            <span class="ctrl-value-readout" id="readout-0">0</span>
+        </div>
+        <div class="ctrl-row">
+            <label>Mode</label>
+            <select id="mode0" onchange="sendAll()">
+                <option value="0">Manual</option>
+                <option value="1">Pulse train</option>
+            </select>
+        </div>
+        <div class="ctrl-row" style="margin-top:8px">
+            <label>Value</label>
+            <input type="range" id="value0" min="0" max="4095" value="0" oninput="updateReadout(0); sendAll()">
+        </div>
+        <div class="trig-btn-row">
+            <button class="trig-btn" onmousedown="trigOn(0)" onmouseup="trigOff(0)" ontouchstart="trigOn(0)" ontouchend="trigOff(0)">Gate</button>
+        </div>
+    </div>
+
+    <div class="ctrl-card" data-index="1">
+        <div class="ctrl-header">
+            <span class="ctrl-name">TRIG 1</span>
+            <span class="ctrl-value-readout" id="readout-1">0</span>
+        </div>
+        <div class="ctrl-row">
+            <label>Mode</label>
+            <select id="mode1" onchange="sendAll()">
+                <option value="0">Manual</option>
+                <option value="1">Pulse train</option>
+            </select>
+        </div>
+        <div class="ctrl-row" style="margin-top:8px">
+            <label>Value</label>
+            <input type="range" id="value1" min="0" max="4095" value="0" oninput="updateReadout(1); sendAll()">
+        </div>
+        <div class="trig-btn-row">
+            <button class="trig-btn" onmousedown="trigOn(1)" onmouseup="trigOff(1)" ontouchstart="trigOn(1)" ontouchend="trigOff(1)">Gate</button>
+        </div>
+    </div>
+
+    <div class="section-label cv">CV Inputs</div>
+    <div class="ctrl-card" data-index="2">
+        <div class="ctrl-header">
+            <span class="ctrl-name">CV 0</span>
+            <span class="ctrl-value-readout" id="readout-2">0</span>
+        </div>
+        <div class="ctrl-row">
+            <label>Mode</label>
+            <select id="mode2" onchange="sendAll()">
+                <option value="0">Manual</option>
+                <option value="1">Pulse train</option>
+                <option value="2">Sine (unipolar)</option>
+                <option value="3">Sine (bipolar)</option>
+                <option value="4">Steps -5..5</option>
+            </select>
+        </div>
+        <div class="ctrl-row" style="margin-top:8px">
+            <label>Value</label>
+            <input type="range" id="value2" min="0" max="4095" value="0" oninput="updateReadout(2); sendAll()">
+        </div>
+    </div>
+
+    <div class="ctrl-card" data-index="3">
+        <div class="ctrl-header">
+            <span class="ctrl-name">CV 1</span>
+            <span class="ctrl-value-readout" id="readout-3">0</span>
+        </div>
+        <div class="ctrl-row">
+            <label>Mode</label>
+            <select id="mode3" onchange="sendAll()">
+                <option value="0">Manual</option>
+                <option value="1">Pulse train</option>
+                <option value="2">Sine (unipolar)</option>
+                <option value="3">Sine (bipolar)</option>
+                <option value="4">Steps -5..5</option>
+            </select>
+        </div>
+        <div class="ctrl-row" style="margin-top:8px">
+            <label>Value</label>
+            <input type="range" id="value3" min="0" max="4095" value="0" oninput="updateReadout(3); sendAll()">
+        </div>
+    </div>
+
+    <div class="section-label pot">Potentiometers</div>
+    <div class="ctrl-card" data-index="4">
+        <div class="ctrl-header">
+            <span class="ctrl-name">POT 0</span>
+            <span class="ctrl-value-readout" id="readout-4">0</span>
+        </div>
+        <div class="ctrl-row">
+            <label>Mode</label>
+            <select id="mode4" onchange="sendAll()">
+                <option value="0">Manual</option>
+                <option value="1">Pulse train</option>
+                <option value="2">Sine (unipolar)</option>
+                <option value="3">Sine (bipolar)</option>
+                <option value="4">Steps -5..5</option>
+            </select>
+        </div>
+        <div class="ctrl-row" style="margin-top:8px">
+            <label>Value</label>
+            <input type="range" id="value4" min="0" max="4095" value="0" oninput="updateReadout(4); sendAll()">
+        </div>
+    </div>
+
+    <div class="ctrl-card" data-index="5">
+        <div class="ctrl-header">
+            <span class="ctrl-name">POT 1</span>
+            <span class="ctrl-value-readout" id="readout-5">0</span>
+        </div>
+        <div class="ctrl-row">
+            <label>Mode</label>
+            <select id="mode5" onchange="sendAll()">
+                <option value="0">Manual</option>
+                <option value="1">Pulse train</option>
+                <option value="2">Sine (unipolar)</option>
+                <option value="3">Sine (bipolar)</option>
+                <option value="4">Steps -5..5</option>
+            </select>
+        </div>
+        <div class="ctrl-row" style="margin-top:8px">
+            <label>Value</label>
+            <input type="range" id="value5" min="0" max="4095" value="0" oninput="updateReadout(5); sendAll()">
+        </div>
+    </div>
+
+    </div><!-- /tab-eurorack -->
+
+    <!-- ============ GROOVEBOXRACK (MIDI) — the TBD-16's macro/rack instrument ============ -->
+    <div id="tab-gbr" class="tabpane active">
+
+    <details class="sect intro" data-intro-key="gbr">
+        <summary>About this tab <span class="sect-sub">— GrooveBoxRack is the TBD-16's one MIDI plugin; how MIDI maps to its 16 tracks</span></summary>
+        <div class="sect-body">
+            <b>Only <code>GrooveBoxRack</code> responds to MIDI</b> — the TBD-16 is a MIDI device (not Eurorack),
+            and this rack hosts up to 16 “machines” (drum voices + synths). Load <code>GrooveBoxRack</code> on a
+            channel in the main WebUI, then play it from here. Heads-up: the rack's <b>MIDI channels don't line up
+            with the WebUI's CHnn channel-strip numbers</b> — the 8 <b>drum tracks</b> (CH01–08) are on <b>MIDI ch
+            10/11/12</b> (the note 36/37/38 picks the track), the <b>synth tracks</b> (CH09–15) on <b>MIDI ch 1–7</b>
+            (one per track), and the audio-input track (CH16) on MIDI ch 8; MIDI ch 9 + 13–16 are unused. The
+            canonical map is <code>data/synthdefinitions.json</code>.
+        </div>
+    </details>
+
+    <details class="sect">
+        <summary>Drum pads <span class="sect-sub">— GrooveBoxRack tracks CH01–08, one shot per click</span></summary>
+        <div class="sect-body">
+            <div class="key-row" id="drumRow"></div>
+        </div>
+    </details>
+
+    <details class="sect" open>
+        <summary>Step sequencer <span class="sect-sub">— 8 drum tracks × 16 steps, drives the pads above</span></summary>
+        <div class="sect-body">
+            <div class="seq-transport">
+                <button class="seq-btn play" id="seqPlay" onclick="seqToggle()">▶ Play</button>
+                <button class="seq-btn" onclick="seqClear()">Clear</button>
+                <button class="seq-btn" onclick="seqDemo()">4/4 demo</button>
+                <label style="font-size:12px;color:var(--text-dim);margin-left:8px">Tempo</label>
+                <input type="range" id="seqTempo" min="40" max="220" value="120" oninput="document.getElementById('seqTempoRO').textContent=this.value+' BPM'" style="max-width:160px">
+                <span class="ctrl-value-readout" id="seqTempoRO" style="min-width:64px">120 BPM</span>
+                <button class="midi-info-btn" id="seqInfoBtn"
+                        onclick="(function(b){var h=document.getElementById('seqHelp');var v=h.style.display==='none';h.style.display=v?'block':'none';b.classList.toggle('active',v);})(this)"
+                        title="About the step sequencer" aria-label="About the step sequencer">ⓘ</button>
+            </div>
+            <div class="midi-help" id="seqHelp" style="display:none">
+                Click a cell: <b>off → on → accent → off</b>. Drag across cells to paint a run.
+                <b>shift+click</b> toggles a cell's accent without cycling through off.
+                The <b>M</b> next to a row label mutes that track in the sequencer (pattern is
+                preserved, firing is skipped).
+            </div>
+            <div class="seq-grid" id="seqGrid"></div>
+        </div>
+    </details>
+
+    <details class="sect" open>
+        <summary>Keyboard &amp; Hardware Input <span class="sect-sub">— route notes to synth tracks (CH09–15)</span></summary>
+        <div class="sect-body">
+            <!-- Hardware (WebMIDI) — single compact row.
+                 Reading order: pick the device (left) → see the result (right).
+                   [Hardware label] [Enable WebMIDI btn — replaced by device dropdown once enabled]
+                   [status pill] [(i)]
+                 The dropdown takes the Enable button's slot (flex:1 fills the gap). -->
+            <div class="ctrl-row" style="margin-bottom:6px">
+                <label style="min-width:74px">Hardware</label>
+                <button class="seq-btn" id="midiEnableBtn" onclick="midiEnableWebMIDI()">Enable WebMIDI</button>
+                <select id="midiDeviceSel" style="flex:1;min-width:0;display:none"></select>
+                <span class="midi-status" id="midiStatus"><span class="midi-led" id="midiLed"></span><span id="midiStatusText">Disconnected</span></span>
+                <button class="midi-info-btn" id="midiInfoBtn"
+                        onclick="midiToggleHelp()"
+                        title="About WebMIDI input" aria-label="About WebMIDI input">ⓘ</button>
+            </div>
+            <div class="midi-help" id="midiHelp" style="display:none">
+                Plug a USB MIDI controller into your machine, click <b>Enable WebMIDI</b>, pick the input,
+                and play.  Notes, velocity and CC all route through to the <b>track selected in the
+                Channel dropdown below</b> — the controller's own MIDI channel is ignored, so you don't
+                have to reconfigure it.  Change the dropdown to switch tracks, or change the machine on
+                the WebUI's track strip — the hardware always plays whatever is currently loaded on the
+                selected track.  CC values reach the rack's <code>handleMidiControlChange</code> on the
+                same channel, so knobs and the mod wheel move whichever params the active machine has
+                registered for those CCs.
+            </div>
+            <div id="midiHint" style="font-size:11px;color:var(--text-dim);margin-bottom:6px;display:none"></div>
+            <div class="ctrl-row">
+                <label style="min-width:74px">Channel</label>
+                <select id="midiCh" style="flex:1;min-width:0"></select>
+                <button class="midi-info-btn" id="midiChInfoBtn"
+                        onclick="(function(b){var h=document.getElementById('midiChHelp');var v=h.style.display==='none';h.style.display=v?'block':'none';b.classList.toggle('active',v);})(this)"
+                        title="About the channel dropdown" aria-label="About the channel dropdown">ⓘ</button>
+            </div>
+            <div class="midi-help" id="midiChHelp" style="display:none">
+                Routes the on-screen keys, your computer keyboard <b>and</b> any hardware MIDI input
+                (WebMIDI) to the selected track. The controller's own MIDI channel is ignored — this
+                dropdown wins.
+            </div>
+            <div class="ctrl-row" style="margin-top:8px">
+                <label>Octave</label>
+                <select id="midiOct">
+                    <option value="24">C1</option>
+                    <option value="36">C2</option>
+                    <option value="48" selected>C3</option>
+                    <option value="60">C4</option>
+                    <option value="72">C5</option>
+                    <option value="84">C6</option>
+                </select>
+                <label style="margin-left:18px">Velocity</label>
+                <input type="range" class="vel-slider" id="midiVel" min="1" max="127" value="100" oninput="document.getElementById('midiVelRO').textContent=this.value">
+                <span class="ctrl-value-readout" id="midiVelRO">100</span>
+            </div>
+            <div style="margin-top:10px;overflow-x:auto">
+                <div class="kbd-wrapper">
+                    <webaudio-keyboard id="kbd" width="640" height="100" min="48" keys="25"
+                        colors="#15151a;#dcdce0;#bcbcc2;#22222a;#0a0a0c;#d57bb5;#b85f9a;#d57bb5;#b04f8c"></webaudio-keyboard>
+                    <div class="kbd-octave-labels" id="kbdOctaveLabels"></div>
+                </div>
+            </div>
+            <div style="font-size:11px;color:var(--text-dim);margin-top:6px">drag across the keys to glissando · click the keyboard once, then play with your computer keyboard (z s x d c … / q 2 w 3 e …)</div>
+        </div>
+    </details>
+
+    </div><!-- /tab-gbr -->
+
+    <script>
+        var sendTimer = null;
+        var sending = false;
+
+        function updateReadout(i) {
+            var el = document.getElementById('value' + i);
+            document.getElementById('readout-' + i).textContent = el.value;
+        }
+
+        function gatherData() {
+            var data = { mode: [], value: [] };
+            for (var i = 0; i < 6; i++) {
+                data.mode.push(parseInt(document.getElementById('mode' + i).value));
+                data.value.push(parseInt(document.getElementById('value' + i).value));
+            }
+            return data;
+        }
+
+        function sendAll() {
+            // Throttle to ~30 fps to avoid overwhelming the server
+            if (sendTimer) return;
+            sendTimer = setTimeout(function() {
+                sendTimer = null;
+                doSend();
+            }, 33);
+        }
+
+        function doSend() {
+            if (sending) return;
+            sending = true;
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', '/ctrl-set', true);
+            xhr.setRequestHeader('Content-Type', 'application/json');
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4) {
+                    sending = false;
+                    setStatus(xhr.status === 200);
                 }
-                $.ajaxq('myq', {
-                    url: '/ctrl-set',
-                    type: 'post',
-                    data: JSON.stringify(allData)
+            };
+            xhr.onerror = function() { sending = false; setStatus(false); };
+            xhr.send(JSON.stringify(gatherData()));
+        }
+
+        function trigOn(i) {
+            document.getElementById('value' + i).value = 4095;
+            updateReadout(i);
+            doSend();
+            // Visual feedback
+            var btns = document.querySelectorAll('[data-index="' + i + '"] .trig-btn');
+            for (var b = 0; b < btns.length; b++) btns[b].classList.add('active');
+        }
+
+        function trigOff(i) {
+            document.getElementById('value' + i).value = 0;
+            updateReadout(i);
+            doSend();
+            var btns = document.querySelectorAll('[data-index="' + i + '"] .trig-btn');
+            for (var b = 0; b < btns.length; b++) btns[b].classList.remove('active');
+        }
+
+        function setStatus(ok) {
+            var dot = document.getElementById('status-dot');
+            var text = document.getElementById('status-text');
+            if (ok) {
+                dot.className = 'status-dot connected';
+                text.textContent = 'Connected to simulator';
+            } else {
+                dot.className = 'status-dot error';
+                text.textContent = 'Connection error';
+            }
+        }
+
+        // Load current state on startup
+        function loadState() {
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', '/ctrl-get', true);
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4) {
+                    if (xhr.status === 200) {
+                        try {
+                            var data = JSON.parse(xhr.responseText);
+                            for (var i = 0; i < 6; i++) {
+                                document.getElementById('mode' + i).value = data.mode[i];
+                                document.getElementById('value' + i).value = data.value[i];
+                                updateReadout(i);
+                            }
+                            setStatus(true);
+                        } catch(e) {
+                            setStatus(false);
+                        }
+                    } else {
+                        setStatus(false);
+                    }
+                }
+            };
+            xhr.onerror = function() { setStatus(false); };
+            xhr.send();
+        }
+
+        // ---- top-level tabs ----
+        function showTab(id) {
+            var panes = document.querySelectorAll('.tabpane');
+            for (var i = 0; i < panes.length; i++) panes[i].classList.toggle('active', panes[i].id === id);
+            var tabs = document.querySelectorAll('.tab');
+            for (var j = 0; j < tabs.length; j++) tabs[j].classList.toggle('active', tabs[j].dataset.tab === id);
+        }
+
+        // ---- shared: send raw MIDI ----
+        function sendMidi(qs) {
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', '/ctrl-midi?' + qs, true);
+            xhr.onreadystatechange = function() { if (xhr.readyState === 4) setStatus(xhr.status === 200); };
+            xhr.onerror = function() { setStatus(false); };
+            xhr.send();
+        }
+        function midiNote(ch, note, vel, on) {
+            if (note < 0) note = 0; if (note > 127) note = 127;
+            sendMidi('ch=' + ch + '&note=' + note + '&vel=' + vel + '&on=' + (on ? 1 : 0));
+        }
+
+        // GrooveBoxRack's 8 drum tracks, as the rack maps MIDI → tracks (handleMidiNoteOn,
+        // matching synthdefinitions.json): drum tracks CH01-03 listen on MIDI ch 10 notes
+        // 36/37/38, CH04-06 on MIDI ch 11 notes 36/37/38, CH07-08 on MIDI ch 12 notes 36/37.
+        // (The "CHnn" labels = the channel-strip numbers in the main WebUI's GrooveBoxRack view.)
+        var DRUMS = [
+            { ch: 10, note: 36, name: '01 Kick'  },  // CH01  digital bass drum
+            { ch: 10, note: 37, name: '02 Kick2' },  // CH02  FM bass drum
+            { ch: 10, note: 38, name: '03 Snare' },  // CH03  digital snare
+            { ch: 11, note: 36, name: '04 Hat'   },  // CH04  hi-hat 1
+            { ch: 11, note: 37, name: '05 Rim'   },  // CH05  rimshot
+            { ch: 11, note: 38, name: '06 Clap'  },  // CH06  clap
+            { ch: 12, note: 36, name: '07 Smp'   },  // CH07  sampler (needs --srom)
+            { ch: 12, note: 37, name: '08 Smp'   }   // CH08  sampler (needs --srom)
+        ];
+
+        // ---- drum pads ----
+        (function buildDrums() {
+            var row = document.getElementById('drumRow');
+            DRUMS.forEach(function(d) {
+                var b = document.createElement('button');
+                b.className = 'key-btn'; b.textContent = d.name; b.title = 'MIDI ch ' + d.ch + ', note ' + d.note;
+                var hit = function(on) {
+                    if (on === b.classList.contains('active')) return;
+                    b.classList.toggle('active', on);
+                    midiNote(d.ch, d.note, parseInt(document.getElementById('midiVel').value), on);
+                };
+                b.addEventListener('mousedown', function(e){ e.preventDefault(); hit(true); });
+                b.addEventListener('mouseup',   function(e){ e.preventDefault(); hit(false); });
+                b.addEventListener('mouseleave',function(){ hit(false); });
+                b.addEventListener('touchstart',function(e){ e.preventDefault(); hit(true); });
+                b.addEventListener('touchend',  function(e){ e.preventDefault(); hit(false); });
+                row.appendChild(b);
+            });
+        })();
+
+        // ---- melodic keyboard (webaudio-keyboard) ----
+        (function buildKeys() {
+            var chSel = document.getElementById('midiCh');
+            // MIDI channel → which GrooveBoxRack track it drives (from synthdefinitions.json).
+            // Note: the rack's MIDI channels DON'T line up with the WebUI's "CHnn" channel-strip
+            // numbers — the 8 drum tracks (CH01-08) are on MIDI 10/11/12, the synth tracks
+            // (CH09-15) on MIDI 1-7, the audio-input track (CH16) on MIDI 8. MIDI 9 + 13-16 unused.
+            // Format: "MIDI N → CHnn Purpose (machine options)".  The track-purpose
+            // name (Bass / Lead / etc.) comes from synthdefinitions.json's track
+            // "name"; the machine options list every voice the track can host so
+            // the user stays oriented even after switching machines in the WebUI.
+            // Keep these in sync with synthdefinitions.json — there's no runtime
+            // fetch from the /ctrl page.
+            var lbls = { 1:' → CH09 Bass (TBD-303 / Sampler)',
+                         2:' → CH10 Bass 2 (TBD-303 / Sampler)',
+                         3:' → CH11 Lead (Macro Osc / Sampler)',
+                         4:' → CH12 Lead 2 (WT / Macro / TBDings / TBDaits / Sampler)',
+                         5:' → CH13 Samples 2 (Sampler)',
+                         6:' → CH14 Samples 3 (Sampler)',
+                         7:' → CH15 Chordo (PolyPad / TBDings / Sampler)',
+                         8:' → CH16 audio in (no notes)',
+                         10:' → CH01-03 drums (notes 36-38)',
+                         11:' → CH04-06 drums (notes 36-38)',
+                         12:' → CH07-08 drums (notes 36-37)' };
+            for (var c = 1; c <= 16; c++) {
+                var o = document.createElement('option');
+                o.value = c; o.textContent = 'MIDI ' + c + (lbls[c] || ' → (unused)');
+                if (c === 1) o.selected = true;
+                chSel.appendChild(o);
+            }
+            var kbd = document.getElementById('kbd');
+            var oct = document.getElementById('midiOct');
+            oct.value = '48';   // default the keyboard's bottom note to C3.
+                                // C is the universal mini-MIDI-controller
+                                // starting note (Launchkey Mini, microKEY,
+                                // Komplete Kontrol M32, MicroLab, …): leftmost
+                                // black-key cluster is the 2-group C#/D#, then
+                                // the 3-group F#/G#/A# is just past the middle.
+
+            // Octave-label overlay: drop note markers under the keyboard so
+            // the leftmost note is unambiguous (black keys overlap white-key
+            // tops, which can confuse first-time users on which note is which).
+            // Labels: the starting white key + every C in the visible range.
+            // Generic — works whatever 'min' is set to.
+            var NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+            function midiName(n) { return NOTE_NAMES[((n % 12) + 12) % 12] + (Math.floor(n / 12) - 1); }
+            function updateOctaveLabels() {
+                var box = document.getElementById('kbdOctaveLabels');
+                if (!box || !kbd || !kbd.kf) return;
+                box.innerHTML = '';
+                var ww = kbd.wwidth;            // set inside setupImage()
+                var mn = +kbd.min;
+                if (!ww || isNaN(mn)) return;
+                var endNote = mn + 24;          // 25-key keyboard
+                // White-key index between the keyboard's leftmost note and the target note
+                function whiteOffset(toNote) {
+                    var c = 0;
+                    for (var n = mn; n < toNote; n++) if (kbd.kf[((n % 12) + 12) % 12] === 0) c++;
+                    return c;
+                }
+                var labelled = {};
+                function addLabel(note) {
+                    if (labelled[note]) return;
+                    if (note < mn || note > endNote) return;
+                    if (kbd.kf[((note % 12) + 12) % 12] !== 0) return;  // only label white keys
+                    labelled[note] = true;
+                    var span = document.createElement('span');
+                    span.textContent = midiName(note);
+                    span.style.left = (1 + (whiteOffset(note) + 0.5) * ww) + 'px';
+                    box.appendChild(span);
+                }
+                // First key (whatever it is) + every C in range
+                addLabel(mn);
+                var firstC = Math.ceil(mn / 12) * 12;
+                for (var c = firstC; c <= endNote; c += 12) addLabel(c);
+            }
+
+            // change of octave → move the keyboard's lowest note + re-label
+            oct.addEventListener('change', function() {
+                if (kbd.setupImage) {
+                    kbd.min = parseInt(oct.value);
+                    kbd.setupImage();
+                    updateOctaveLabels();
+                }
+            });
+            // webaudio-keyboard fires "change" with e.note = [state(1=on/0=off), midiNote]
+            function wire() {
+                kbd.addEventListener('change', function(e) {
+                    var ch  = parseInt(chSel.value);
+                    var vel = parseInt(document.getElementById('midiVel').value);
+                    midiNote(ch, e.note[1], e.note[0] ? vel : 0, e.note[0]);
                 });
             }
-        </script>
-    </ons-page>
-</template>
+            // the custom element may not be upgraded yet when this runs
+            if (kbd.setupImage) { kbd.min = 48; kbd.setupImage(); wire(); updateOctaveLabels(); }
+            else customElements.whenDefined('webaudio-keyboard').then(function(){
+                kbd.min = 48; kbd.setupImage && kbd.setupImage(); wire(); updateOctaveLabels();
+            });
+        })();
+
+        // ---- step sequencer (8 drum tracks × 16 steps, mapped via DRUMS) ----
+        var SEQ_TRACKS = DRUMS.length, SEQ_STEPS = 16;
+        var seqPat = [];                       // seqPat[track][step] = 0 | 1 (normal) | 2 (accent)
+        var seqMute = [];                      // seqMute[track] = true → seqFireStep skips this row
+        var seqPlaying = false, seqStep = 0, seqTimer = null, seqNextTime = 0;
+        var seqPainting = false, seqPaintState = 0;   // drag-to-paint
+        for (var t = 0; t < SEQ_TRACKS; t++) {
+            seqPat[t] = []; for (var s = 0; s < SEQ_STEPS; s++) seqPat[t][s] = 0;
+            seqMute[t] = false;
+        }
+
+        function seqSetCell(ti, si, v) { if (seqPat[ti][si] !== v) { seqPat[ti][si] = v; renderSeqCell(ti, si); } }
+        function seqCellFromPoint(x, y) {
+            var el = document.elementFromPoint(x, y);
+            return (el && el.classList && el.classList.contains('seq-cell')) ? el : null;
+        }
+        window.addEventListener('mouseup', function(){ seqPainting = false; });
+
+        (function buildSeq() {
+            var g = document.getElementById('seqGrid');
+            g.appendChild(document.createElement('div')); // top-left corner
+            for (var s = 0; s < SEQ_STEPS; s++) {
+                var h = document.createElement('div'); h.className = 'seq-colhead'; h.textContent = (s + 1);
+                g.appendChild(h);
+            }
+            for (var t = 0; t < SEQ_TRACKS; t++) {
+                var lbl = document.createElement('div'); lbl.className = 'seq-rowlabel';
+                lbl.dataset.t = t;
+                var muteBtn = document.createElement('button');
+                muteBtn.className = 'seq-mute-btn'; muteBtn.textContent = 'M';
+                muteBtn.title = 'Mute this sequencer row (local — does not touch the rack mixer\'s chN_mute)';
+                muteBtn.dataset.t = t;
+                muteBtn.addEventListener('click', function(e) {
+                    e.preventDefault(); e.stopPropagation();
+                    seqToggleMute(+this.dataset.t);
+                });
+                var name = document.createElement('span'); name.className = 'seq-rowname';
+                name.textContent = DRUMS[t].name;
+                lbl.title = 'MIDI ch ' + DRUMS[t].ch + ', note ' + DRUMS[t].note;
+                lbl.appendChild(muteBtn); lbl.appendChild(name);
+                g.appendChild(lbl);
+                for (var s2 = 0; s2 < SEQ_STEPS; s2++) {
+                    var c = document.createElement('div');
+                    c.className = 'seq-cell' + (s2 % 4 === 0 ? ' beat' : '');
+                    c.dataset.t = t; c.dataset.s = s2;
+                    c.addEventListener('mousedown', function(e) {
+                        e.preventDefault();
+                        var ti = +this.dataset.t, si = +this.dataset.s;
+                        if (e.shiftKey) seqPat[ti][si] = (seqPat[ti][si] === 2) ? 1 : 2;   // shift = toggle accent
+                        else            seqPat[ti][si] = (seqPat[ti][si] + 1) % 3;          // click = off→on→accent→off
+                        renderSeqCell(ti, si);
+                        seqPaintState = seqPat[ti][si]; seqPainting = true;                  // drag → paint this value
+                    });
+                    c.addEventListener('mouseenter', function() {
+                        if (seqPainting) seqSetCell(+this.dataset.t, +this.dataset.s, seqPaintState);
+                    });
+                    c.addEventListener('touchstart', function(e) {
+                        e.preventDefault();
+                        var ti = +this.dataset.t, si = +this.dataset.s;
+                        seqPat[ti][si] = (seqPat[ti][si] + 1) % 3; renderSeqCell(ti, si);
+                        seqPaintState = seqPat[ti][si]; seqPainting = true;
+                    });
+                    g.appendChild(c);
+                }
+            }
+            g.addEventListener('touchmove', function(e) {
+                if (!seqPainting) return;
+                e.preventDefault();
+                var tp = e.touches[0]; var el = seqCellFromPoint(tp.clientX, tp.clientY);
+                if (el) seqSetCell(+el.dataset.t, +el.dataset.s, seqPaintState);
+            }, { passive: false });
+            g.addEventListener('touchend', function(){ seqPainting = false; });
+        })();
+        function seqCellEl(t, s) { return document.querySelector('.seq-cell[data-t="' + t + '"][data-s="' + s + '"]'); }
+        function renderSeqCell(t, s) {
+            var el = seqCellEl(t, s); if (!el) return;
+            el.classList.toggle('on', seqPat[t][s] > 0);
+            el.classList.toggle('accent', seqPat[t][s] === 2);
+        }
+        function renderRowMute(t) {
+            var muted = !!seqMute[t];
+            // label + M button get the muted styling
+            var lbl = document.querySelector('.seq-rowlabel[data-t="' + t + '"]');
+            if (lbl) lbl.classList.toggle('muted', muted);
+            var btn = document.querySelector('.seq-mute-btn[data-t="' + t + '"]');
+            if (btn) btn.classList.toggle('on', muted);
+            // dim every cell in the row
+            for (var s = 0; s < SEQ_STEPS; s++) {
+                var c = seqCellEl(t, s);
+                if (c) c.classList.toggle('row-muted', muted);
+            }
+        }
+        function seqToggleMute(t) { seqMute[t] = !seqMute[t]; renderRowMute(t); }
+        function renderSeq() {
+            for (var t = 0; t < SEQ_TRACKS; t++) {
+                for (var s = 0; s < SEQ_STEPS; s++) renderSeqCell(t, s);
+                renderRowMute(t);
+            }
+        }
+        function seqClear() { for (var t = 0; t < SEQ_TRACKS; t++) for (var s = 0; s < SEQ_STEPS; s++) seqPat[t][s] = 0; renderSeq(); }
+        function seqDemo() {
+            seqClear();
+            // D1 kick on the four, D3 snare on 5 & 13, D4 hat on every other 16th
+            for (var s = 0; s < SEQ_STEPS; s += 4) seqPat[0][s] = (s === 0 ? 2 : 1);
+            seqPat[2][4] = 2; seqPat[2][12] = 2;
+            for (var s2 = 0; s2 < SEQ_STEPS; s2 += 2) seqPat[3][s2] = (s2 % 4 === 0 ? 1 : 2);
+            renderSeq();
+        }
+        function seqHighlight(col) {
+            var cells = document.querySelectorAll('.seq-cell');
+            for (var i = 0; i < cells.length; i++) cells[i].classList.toggle('playcol', +cells[i].dataset.s === col);
+        }
+        function seqFireStep(step) {
+            for (var t = 0; t < SEQ_TRACKS; t++) {
+                if (seqMute[t]) continue;     // M-button on the row label: skip firing, keep the pattern intact
+                if (seqPat[t][step] > 0) midiNote(DRUMS[t].ch, DRUMS[t].note, seqPat[t][step] === 2 ? 127 : 90, 1);
+            }
+        }
+        function seqTick() {
+            // simple drift-corrected scheduler — fine for a desktop test tool
+            var bpm = parseInt(document.getElementById('seqTempo').value);
+            var stepMs = 60000 / bpm / 4; // 16th notes
+            var now = performance.now();
+            if (seqNextTime === 0) seqNextTime = now;
+            while (seqNextTime <= now) {
+                seqFireStep(seqStep);
+                seqHighlight(seqStep);
+                seqStep = (seqStep + 1) % SEQ_STEPS;
+                seqNextTime += stepMs;
+            }
+            seqTimer = setTimeout(seqTick, Math.max(5, Math.min(25, seqNextTime - performance.now())));
+        }
+        function seqToggle() {
+            seqPlaying = !seqPlaying;
+            var btn = document.getElementById('seqPlay');
+            btn.classList.toggle('active', seqPlaying);
+            btn.textContent = seqPlaying ? '■ Stop' : '▶ Play';
+            if (seqPlaying) { seqStep = 0; seqNextTime = 0; seqTick(); }
+            else { clearTimeout(seqTimer); seqTimer = null; seqHighlight(-1); }
+        }
+
+        // ---- WebMIDI input (Phase 1: pass-through to /ctrl-midi) -------------
+        // The controller's MIDI channel goes through as-is; the on-screen
+        // keyboard's Channel dropdown is independent.  Persists the last-
+        // selected device by name in localStorage (port.id can be unstable
+        // across browser sessions on some platforms, but name is reliable).
+        var midiAccess = null;
+        var midiActivePort = null;        // current MIDIInput we're subscribed to
+        var midiLedTimer = null;
+        var MIDI_LS_KEY = 'tbd-midi-input-device';
+
+        function midiSetStatus(text, cls) {
+            var el = document.getElementById('midiStatus');
+            var txt = document.getElementById('midiStatusText');
+            var led = document.getElementById('midiLed');
+            if (txt) txt.textContent = text;
+            if (el) { el.classList.remove('connected', 'error'); if (cls) el.classList.add(cls); }
+            if (led) { led.classList.remove('connected'); if (cls === 'connected') led.classList.add('connected'); }
+        }
+
+        function midiToggleHelp() {
+            var help = document.getElementById('midiHelp');
+            var btn  = document.getElementById('midiInfoBtn');
+            if (!help) return;
+            var showing = help.style.display !== 'none';
+            help.style.display = showing ? 'none' : 'block';
+            if (btn) btn.classList.toggle('active', !showing);
+        }
+
+        function midiFlashLed() {
+            var led = document.getElementById('midiLed');
+            if (!led) return;
+            led.classList.add('active');
+            if (midiLedTimer) clearTimeout(midiLedTimer);
+            midiLedTimer = setTimeout(function(){ led.classList.remove('active'); }, 90);
+        }
+
+        function midiOnMessage(e) {
+            // e.data is a Uint8Array of 1-3 bytes (no SysEx in this handler).
+            var d = e.data;
+            if (!d || d.length < 1) return;
+            var status = d[0] & 0xF0;
+            // Force every incoming hardware message onto the Channel dropdown's
+            // selected MIDI channel.  This makes the dropdown authoritative for
+            // ALL input sources (on-screen keys, computer keyboard, Launchkey).
+            // Picking a new machine on the WebUI's track strip then naturally
+            // changes what the hardware plays — no controller-side reconfig.
+            // The controller's own MIDI channel is ignored.
+            var chSel = document.getElementById('midiCh');
+            var ch = chSel ? parseInt(chSel.value) : 1;
+            if (!isFinite(ch) || ch < 1 || ch > 16) ch = 1;
+            midiFlashLed();
+            if (status === 0x90) {            // Note On (vel 0 == off, per MIDI spec)
+                var vel = d[2] || 0;
+                sendMidi('ch=' + ch + '&note=' + d[1] + '&vel=' + vel + '&on=' + (vel > 0 ? 1 : 0));
+            } else if (status === 0x80) {     // Note Off
+                sendMidi('ch=' + ch + '&note=' + d[1] + '&vel=0&on=0');
+            } else if (status === 0xB0) {     // Control Change
+                sendMidi('ch=' + ch + '&cc=' + d[1] + '&val=' + (d[2] || 0));
+            }
+            // Pitch Bend (0xE0), Channel Pressure (0xD0), Poly AT (0xA0) and System
+            // Realtime (0xF8+) are dropped for Phase 1 — the rack's parser doesn't
+            // route them yet.  Pick up in Phase 4 when we wire transport sync.
+        }
+
+        function midiSubscribe(port) {
+            if (midiActivePort) midiActivePort.onmidimessage = null;
+            midiActivePort = port;
+            if (port) {
+                port.onmidimessage = midiOnMessage;
+                midiSetStatus('Connected · ' + port.name, 'connected');
+                try { localStorage.setItem(MIDI_LS_KEY, port.name); } catch(_){}
+            } else {
+                midiSetStatus('No device', null);
+            }
+        }
+
+        function midiPopulateDevices() {
+            var sel = document.getElementById('midiDeviceSel');
+            if (!sel || !midiAccess) return;
+            sel.innerHTML = '';
+            var inputs = [];
+            midiAccess.inputs.forEach(function(p){ inputs.push(p); });
+            if (inputs.length === 0) {
+                var o = document.createElement('option');
+                o.textContent = '(no MIDI inputs connected)';
+                o.disabled = true; o.selected = true;
+                sel.appendChild(o);
+                midiSubscribe(null);
+                document.getElementById('midiHint').style.display = 'block';
+                document.getElementById('midiHint').textContent = 'Plug a MIDI controller in via USB, then click the picker — your browser auto-detects.';
+                return;
+            }
+            var preferred = null;
+            try { preferred = localStorage.getItem(MIDI_LS_KEY) || ''; } catch(_){}
+            inputs.forEach(function(p, i) {
+                var o = document.createElement('option');
+                o.value = p.id;
+                o.textContent = p.name + (p.manufacturer ? ' (' + p.manufacturer + ')' : '');
+                if (preferred && p.name === preferred) o.selected = true;
+                else if (!preferred && i === 0) o.selected = true;
+                sel.appendChild(o);
+            });
+            document.getElementById('midiHint').style.display = 'none';
+            // Subscribe to whatever is selected.
+            var picked = inputs.find(function(p){ return p.id === sel.value; }) || inputs[0];
+            midiSubscribe(picked);
+        }
+
+        function midiEnableWebMIDI() {
+            if (!navigator.requestMIDIAccess) {
+                midiSetStatus('WebMIDI not supported in this browser', 'error');
+                return;
+            }
+            var btn = document.getElementById('midiEnableBtn');
+            if (btn) { btn.disabled = true; btn.textContent = 'Requesting…'; }
+            navigator.requestMIDIAccess({ sysex: false }).then(function(access) {
+                midiAccess = access;
+                if (btn) { btn.style.display = 'none'; }
+                // device dropdown is in the same row as Enable/status pill;
+                // unhide it once WebMIDI is granted.
+                document.getElementById('midiDeviceSel').style.display = 'inline-block';
+                midiPopulateDevices();
+                midiAccess.onstatechange = function() { midiPopulateDevices(); };
+                document.getElementById('midiDeviceSel').addEventListener('change', function() {
+                    var port = midiAccess.inputs.get(this.value);
+                    midiSubscribe(port);
+                });
+            }).catch(function(err) {
+                if (btn) { btn.disabled = false; btn.textContent = 'Enable WebMIDI'; }
+                midiSetStatus('Permission denied or error: ' + (err && err.message || err), 'error');
+            });
+        }
+
+        // If the user previously enabled WebMIDI and the browser remembers
+        // the grant, kick the flow automatically on /ctrl reload — no extra
+        // click needed.
+        if (navigator.permissions && navigator.permissions.query) {
+            navigator.permissions.query({ name: 'midi' }).then(function(p) {
+                if (p && p.state === 'granted') midiEnableWebMIDI();
+            }).catch(function(){ /* not all browsers support midi permission query */ });
+        }
+
+        // "About this tab" cards — auto-open on first visit per tab so new
+        // users see the quickstart; then mark seen so subsequent reloads keep
+        // them collapsed.  Per-tab localStorage flag (key from data-intro-key).
+        (function initIntroCards() {
+            var cards = document.querySelectorAll('details.sect.intro[data-intro-key]');
+            for (var i = 0; i < cards.length; i++) {
+                var el = cards[i];
+                var key = 'tbdSimIntroSeen.' + el.getAttribute('data-intro-key');
+                var seen = false;
+                try { seen = !!localStorage.getItem(key); } catch (e) { /* ignore */ }
+                if (!seen) {
+                    el.setAttribute('open', '');
+                    try { localStorage.setItem(key, '1'); } catch (e) { /* ignore */ }
+                }
+            }
+        })();
+
+        loadState();
+    </script>
 </body>
 </html>

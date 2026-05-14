@@ -4,7 +4,7 @@ CTAG TBD >>to be determined<< is an open source eurorack synthesizer module.
 A project conceived within the Creative Technologies Arbeitsgruppe of
 Kiel University of Applied Sciences: https://www.creative-technologies.de
 
-(c) 2020 by Robert Manzke. All rights reserved.
+(c) 2020-2026 by Robert Manzke. All rights reserved.
 
 The CTAG TBD software is licensed under the GNU General Public License
 (GPL 3.0), available here: https://www.gnu.org/licenses/gpl-3.0.txt
@@ -77,6 +77,21 @@ int SimSPManager::inout(void *outputBuffer, void *inputBuffer, unsigned int nBuf
     pd.buf = fbuf;
     pd.cv = cv;
     pd.trig = trig;
+    // the device fills these from the RP2350 sequencer; we have none, so use a
+    // fixed default tempo and drain whatever MIDI the /ctrl page (or future MIDI
+    // input) has queued via SendMidi().  Must be initialised — pd is on the stack.
+    pd.sequencer_tempo = 12000; // 120.00 BPM (bpm * 100)
+    pd.sequencer_quantum = 4;
+    pd.midi_bytes_length = 0;
+    {
+        std::lock_guard<std::mutex> lk(midiMutex);
+        if (!midiFifo.empty()) {
+            size_t n = std::min(midiFifo.size(), sizeof(pd.midi_bytes));
+            memcpy(pd.midi_bytes, midiFifo.data(), n);
+            pd.midi_bytes_length = static_cast<uint32_t>(n);
+            midiFifo.clear();
+        }
+    }
 
     //if ( status ) std::cout << "Stream over/underflow detected." << std::endl;
 
@@ -91,6 +106,11 @@ int SimSPManager::inout(void *outputBuffer, void *inputBuffer, unsigned int nBuf
                 SimSPManager::sp[1]->Process(pd); // 0 is not a stereo processor
         audioMutex.unlock();
     }
+
+    // safety net: never hand the audio device out-of-range samples (a hot plugin/preset
+    // — e.g. the GrooveBoxRack factory preset summing 8 drum tracks — shouldn't pop the
+    // driver or hurt your ears). tanh: ~transparent at normal levels, soft-saturates past ±1.
+    for (int i = 0; i < 32 * 2; i++) fbuf[i] = std::tanh(fbuf[i]);
 
     memcpy(outputBuffer, fbuf, 32 * 2 * 4);
     return 0;
@@ -159,18 +179,45 @@ void SimSPManager::StartSoundProcessor(int iSoundCardID, string wavFile, string 
     iParams.nChannels = 2;
     oParams.deviceId = iSoundCardID;
     oParams.nChannels = 2;
-    unsigned int bufferFrames = 32;
+    unsigned int bufferFrames = 32;   // must stay 32 — inout() processes exactly one 32-frame DSP block
+    RtAudio::StreamOptions streamOptions;
+    // Ask for a real-time priority audio thread + a bit of extra device-side buffering.
+    // This reduces the occasional crackle/underrun you get with a 32-sample buffer on a
+    // non-realtime desktop OS. (Harmless if the backend ignores numberOfBuffers, e.g. CoreAudio.)
+    streamOptions.flags = RTAUDIO_SCHEDULE_REALTIME;
+    streamOptions.numberOfBuffers = 4;
     std::cout << "Trying to open device id: " << iSoundCardID << endl;
     try {
         if (bOutOnly) {
-            audio.openStream(&oParams, NULL, RTAUDIO_FLOAT32, 44100, &bufferFrames, &SimSPManager::inout);
+            audio.openStream(&oParams, NULL, RTAUDIO_FLOAT32, 44100, &bufferFrames, &SimSPManager::inout, NULL, &streamOptions);
         } else {
-            audio.openStream(&oParams, &iParams, RTAUDIO_FLOAT32, 44100, &bufferFrames, &SimSPManager::inout);
+            audio.openStream(&oParams, &iParams, RTAUDIO_FLOAT32, 44100, &bufferFrames, &SimSPManager::inout, NULL, &streamOptions);
         }
         // configure channels
         model = std::make_unique<SPManagerDataModel>();
-        SetSoundProcessorChannel(0, model->GetActiveProcessorID(0));
-        SetSoundProcessorChannel(1, model->GetActiveProcessorID(1));
+        // Mirror main/SPManager.cpp's fallback chain so a stale activeProcessor
+        // id in device.json (e.g. "PicoSeqRack" from before the rack rename)
+        // doesn't strand slot 0 empty.  SetSoundProcessorChannel returns
+        // silently when HasPluginID(id) is false, so we have to detect the
+        // failure via sp[0] == nullptr afterwards.
+        string id0 = model->GetActiveProcessorID(0);
+        string id1 = model->GetActiveProcessorID(1);
+        SetSoundProcessorChannel(0, id0);
+        if (sp[0] == nullptr) {
+            std::cerr << "[SimSPManager] ch0 plugin '" << id0
+                      << "' not available — falling back to GrooveBoxRack." << std::endl;
+            SetSoundProcessorChannel(0, "GrooveBoxRack");
+        }
+        if (sp[0] == nullptr) {
+            std::cerr << "[SimSPManager] ch0 GrooveBoxRack also unavailable — falling back to Void." << std::endl;
+            SetSoundProcessorChannel(0, "Void");
+        }
+        SetSoundProcessorChannel(1, id1);
+        if (sp[1] == nullptr && id1 != "Void") {
+            std::cerr << "[SimSPManager] ch1 plugin '" << id1
+                      << "' not available — falling back to Void." << std::endl;
+            SetSoundProcessorChannel(1, "Void");
+        }
     }
     catch (RtAudioError &e) {
         e.printMessage();
@@ -219,13 +266,19 @@ void SimSPManager::SetSoundProcessorChannel(const int chan, const string &id) {
     if(chan == 1) aType = ctagSPAllocator::AllocationType::CH1;
     if(model->IsStereo(id)) aType = ctagSPAllocator::AllocationType::STEREO;
     sp[chan] = ctagSoundProcessorFactory::Create(id, aType);
-    sp[chan] = ctagSoundProcessorFactory::Create(id, aType);
+    if(sp[chan] == nullptr){
+        // e.g. a plugin listed in the data files but not compiled into this build
+        ESP_LOGE("SP", "Could not create sound processor '%s' — leaving channel %d empty", id.c_str(), chan);
+        audioMutex.unlock();
+        return;
+    }
     model->SetActivePluginID(id, chan);
     sp[chan]->LoadPreset(model->GetActivePatchNum(chan));
     audioMutex.unlock();
 }
 
 void SimSPManager::SetChannelParamValue(const int chan, const string &id, const string &key, const int val) {
+    if (sp[chan] == nullptr) return;
     sp[chan]->SetParamValue(id, key, val);
 }
 
@@ -283,6 +336,10 @@ void SimSPManager::SetProcessParams(const string &params) {
     stimulus.UpdateStimulus(mode, value);
 }
 
+void SimSPManager::SetConfigurationFromJSON(const string &data) {
+    model->SetConfigurationFromJSON(data);
+}
+
 string SimSPManager::GetAllFavorites() {
     return favModel->GetAllFavorites();
 }
@@ -311,4 +368,15 @@ std::unique_ptr<SPManagerDataModel> SimSPManager::model;
 std::unique_ptr<CTAG::FAV::FavoritesModel> SimSPManager::favModel;
 std::unique_ptr<SimDataModel> SimSPManager::simModel;
 SimStimulus SimSPManager::stimulus;
+std::mutex SimSPManager::midiMutex;
+std::vector<uint8_t> SimSPManager::midiFifo;
+
+void SimSPManager::SendMidi(const uint8_t *bytes, size_t len) {
+    if (bytes == nullptr || len == 0) return;
+    std::lock_guard<std::mutex> lk(midiMutex);
+    // cap so a slow audio thread can't let this grow without bound (and so it
+    // always fits ProcessData.midi_bytes, which is 400 bytes on the device)
+    if (midiFifo.size() + len > 384) midiFifo.clear();
+    midiFifo.insert(midiFifo.end(), bytes, bytes + len);
+}
 

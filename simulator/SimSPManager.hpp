@@ -4,7 +4,7 @@ CTAG TBD >>to be determined<< is an open source eurorack synthesizer module.
 A project conceived within the Creative Technologies Arbeitsgruppe of
 Kiel University of Applied Sciences: https://www.creative-technologies.de
 
-(c) 2020 by Robert Manzke. All rights reserved.
+(c) 2020-2026 by Robert Manzke. All rights reserved.
 
 The CTAG TBD software is licensed under the GNU General Public License
 (GPL 3.0), available here: https://www.gnu.org/licenses/gpl-3.0.txt
@@ -24,7 +24,9 @@ respective component folders / files if different from this license.
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <vector>
 #include "ctagSoundProcessorFactory.hpp"
 #include "ctagSoundProcessor.hpp"
 #include "SPManagerDataModel.hpp"
@@ -52,14 +54,17 @@ namespace CTAG {
             }
 
             static const char *GetCStrJSONActivePluginParams(const int chan) {
+                if (sp[chan] == nullptr) return "{}";
                 return sp[chan]->GetCStrJSONParamSpecs();
             }
 
             static const char *GetCStrJSONGetPresets(const int chan) { // names of all available presets
+                if (sp[chan] == nullptr) return "[]";
                 return sp[chan]->GetCStrJSONPresets();
             }
 
             static const char *GetCStrJSONAllPresetData(const int chan) { // current preset as JSON
+                if (sp[chan] == nullptr) return "{}";
                 return sp[chan]->GetCStrJSONAllPresetData();
             }
 
@@ -98,6 +103,13 @@ namespace CTAG {
             static void StoreFavorite(int const &id, const string &fav);
             static void ActivateFavorite(const int &id);
 
+            // Inject raw MIDI bytes into the next audio block's ProcessData.midi_bytes.
+            // The device gets these from the RP2350 sequencer / USB-MIDI; the simulator
+            // has neither, so MIDI-driven plugins (GrooveBoxRack, anything reading
+            // data.midi_bytes) are silent until something calls this — the /ctrl page's
+            // note buttons do (via POST /ctrl-midi).
+            static void SendMidi(const uint8_t *bytes, size_t len);
+
         private:
 
             static void updateConfiguration();
@@ -112,6 +124,9 @@ namespace CTAG {
 
             static std::unique_ptr<SimDataModel> simModel;
             static SimStimulus stimulus;
+
+            static std::mutex midiMutex;
+            static std::vector<uint8_t> midiFifo; // bytes waiting for the next Process()
         };
     }
 }

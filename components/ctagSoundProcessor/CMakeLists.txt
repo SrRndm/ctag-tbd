@@ -2,6 +2,12 @@
 file(GLOB SOUND_PROCESSORS ctagSoundProcessor*.cpp)
 # remove item matching "ctagSoundProcessor.cpp" from ${SOUND_PROCESSORS}
 # list(FILTER SOUND_PROCESSORS EXCLUDE REGEX "ctagSoundProcessor\\.cpp$")
+
+# GrooveBoxRack is a dadamachines TBD-16 addition, requires SD card + RP2350
+if(NOT CONFIG_TBD_USE_SD_CARD)
+    list(FILTER SOUND_PROCESSORS EXCLUDE REGEX "GrooveBoxRack")
+endif()
+
 # clean generated directory
 file(REMOVE_RECURSE ${CMAKE_BINARY_DIR}/gen_include)
 # convert JSON descriptors to c headers and extract processor IDs
@@ -60,6 +66,12 @@ file(GLOB SRCS_FILES
         ${CMAKE_BINARY_DIR}/gen_include/*.hpp
         )
 
+# rack/ files are only used by GrooveBoxRack (dadamachines TBD-16)
+if(CONFIG_TBD_USE_SD_CARD)
+    file(GLOB RACK_FILES rack/*.hpp rack/*.cpp)
+    list(APPEND SRCS_FILES ${RACK_FILES})
+endif()
+
 if (TBD_SIM)
     add_library(ctagsp STATIC ${SRCS_FILES})
     target_include_directories(ctagsp PRIVATE . ${CMAKE_BINARY_DIR}/gen_include)
@@ -70,7 +82,7 @@ else ()
     idf_component_register(SRCS ${SRCS_FILES}
             INCLUDE_DIRS . ${CMAKE_BINARY_DIR}/gen_include
             REQUIRES mutable esp-dsp moog
-            PRIV_REQUIRES rapidjson spi_flash)
+            PRIV_REQUIRES rapidjson spi_flash esp_timer)
     target_compile_options(${COMPONENT_LIB} PRIVATE
             -Wno-unused-local-typedefs
             -ffast-math

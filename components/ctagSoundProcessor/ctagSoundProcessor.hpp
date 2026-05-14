@@ -4,7 +4,7 @@ CTAG TBD >>to be determined<< is an open source eurorack synthesizer module.
 A project conceived within the Creative Technologies Arbeitsgruppe of
 Kiel University of Applied Sciences: https://www.creative-technologies.de
 
-(c) 2020, 2025 by Robert Manzke. All rights reserved.
+(c) 2020-2026 by Robert Manzke. All rights reserved.
 
 The CTAG TBD software is licensed under the GNU General Public License
 (GPL 3.0), available here: https://www.gnu.org/licenses/gpl-3.0.txt
@@ -86,6 +86,7 @@ When fragmentation occurs, there are no more large contiguous chunks available.
 #include <functional>
 #include "ctagSPDataModel.hpp"
 #include "ctagSPAllocator.hpp"
+#include "helpers/PsramAllocator.hpp"
 
 using namespace std;
 
@@ -96,6 +97,10 @@ namespace CTAG {
             void *controlData; // use this for plugin specific control data, points at beginning of spi transaction buffer
             float *cv;
             uint8_t *trig;
+            uint8_t midi_bytes[400];
+            uint32_t midi_bytes_length;
+            uint32_t sequencer_tempo; // bpm * 100
+            uint8_t sequencer_quantum;
         };
 
         class ctagSoundProcessor {
@@ -191,6 +196,46 @@ namespace CTAG {
                 loadPresetInternal();
             }
 
+            virtual void setTrackMachine(const uint8_t trackIndex, const std::string machineId, float volumeMultiplier) {
+                // default implementation does nothing, override in derived class for volume support
+            }
+
+            virtual void setTrackVolumeMultiplier(const uint8_t trackIndex, float volumeMultiplier) {
+                // default no-op. GrooveBoxRack overrides to write the new gain into
+                // the per-track RackChannelMixer so REST `?action=reload&id=X`
+                // takes effect on the running mixer without a power cycle when
+                // only the macro's volmult changed (same machine, same params).
+            }
+
+            virtual void setTrackBank(const uint8_t trackIndex, const uint16_t bankIndex) {
+                // default implementation does nothing, override in derived class if needed
+            }
+
+            virtual void setTrackMute(const uint8_t trackIndex, bool muted) {
+                // default implementation does nothing, override in derived class to
+                // forward Pico-side user mute into the rack's per-channel mixer.
+            }
+
+            virtual void handleMidiNoteOn(const uint8_t channel, uint8_t note, uint8_t velocity) {
+                // default implementation does nothing, override in derived class if needed
+            }
+
+            virtual void handleMidiNoteOff(const uint8_t channel, uint8_t note, uint8_t velocity) {
+                // default implementation does nothing, override in derived class if needed
+            }
+
+            virtual void handleMidiControlChange(const uint8_t channel, uint8_t control, uint8_t value) {
+                // default implementation does nothing, override in derived class if needed
+            }
+
+            virtual void handleMacroMidiControlChange(const uint8_t channel, uint8_t control, uint8_t value) {
+                // default implementation does nothing, override in derived class if needed
+            }
+
+            virtual void handleMidiControlChangeNRPM(const uint8_t channel, uint8_t control, uint16_t value) {
+                // default implementation does nothing, override in derived class if needed
+            }
+
         protected:
 
             virtual void knowYourself() = 0;
@@ -227,6 +272,19 @@ namespace CTAG {
             virtual void loadPresetInternal() {
                 // iterate all parameters, take names from parameter map (first element)
                 for (const auto &kv: pMapPar) {
+                    // Skip params the active preset doesn't carry.  GetParamValue
+                    // returns 0 for missing ids, which previously clobbered:
+                    //   1) C++ header defaults (e.g. RackTBDaits::level_par {2900})
+                    //      down to 0 — voices started up silent on first boot.
+                    //   2) Primary atomics via aliased setters: WTOsc registers
+                    //      both "gain" (ctrl 14) and "gain2" (ctrl 29, backcompat)
+                    //      writing to the same atomic; pMapPar walks them in
+                    //      alphabetical order, so the alias overwrote the
+                    //      already-loaded gain value with 0.
+                    // Preserve the existing atomic value when the preset is silent
+                    // on this id — the voice's header default or whatever the macro
+                    // layer last wrote stays in place.
+                    if (!model->HasParam(kv.first)) continue;
                     setParamValueInternal(kv.first, "current", model->GetParamValue(kv.first, "current"));
                     // check if cv and trig are set in preset, if so set in processor param
                     if (model->IsParamCV(kv.first)) {
@@ -245,9 +303,21 @@ namespace CTAG {
             int instance {0};
             std::unique_ptr<ctagSPDataModel> model = nullptr;
             string id = "";
-            map<string, function<void(const int)>> pMapPar;
-            map<string, function<void(const int)>> pMapCv;
-            map<string, function<void(const int)>> pMapTrig;
+            // PSRAM-backed param maps — big plugins like GrooveBoxRack populate
+            // ~400 entries here, which previously consumed ~30 KB of internal
+            // RAM and triggered std::bad_alloc on hardware mid-Init (around
+            // ch13_smp.Init).  PsramAllocator routes the red-black-tree nodes
+            // (and their std::function targets) into PSRAM where there's
+            // 32 MB of headroom.  Falls back to malloc() if PSRAM is absent
+            // so non-PSRAM chips / sim builds keep working unchanged.
+            HELPERS::PsramStringMap<function<void(const int)>> pMapPar;
+            HELPERS::PsramStringMap<function<void(const int)>> pMapCv;
+            HELPERS::PsramStringMap<function<void(const int)>> pMapTrig;
+
+
+            // virtual void handleParameterValue(const uint8_t trackIndex, const uint8_t parameterIndex, int32_t value) {
+            //     // default implementation does nothing, override in derived class if needed
+            // }
         };
     }
 }

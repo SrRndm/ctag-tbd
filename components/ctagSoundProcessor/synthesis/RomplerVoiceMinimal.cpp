@@ -4,7 +4,7 @@ CTAG TBD >>to be determined<< is an open source eurorack synthesizer module.
 A project conceived within the Creative Technologies Arbeitsgruppe of
 Kiel University of Applied Sciences: https://www.creative-technologies.de
 
-(c) 2020 by Robert Manzke. All rights reserved.
+(c) 2020-2026 by Robert Manzke. All rights reserved.
 
 The CTAG TBD software is licensed under the GNU General Public License
 (GPL 3.0), available here: https://www.gnu.org/licenses/gpl-3.0.txt
@@ -47,10 +47,21 @@ namespace CTAG::SYNTHESIS {
         sliceLockedStartOffset = params.startOffsetRelative;
 
         if (!sampleRom.HasSlice(slice)) {
+            // Audio-thread: never printf here. Even gated to every 50000 calls
+            // the printf can block long enough to corrupt the audio buffer.
+            // static uint32_t _hasSliceDiagCtr = 0;
+            // if ((_hasSliceDiagCtr++ % 50000) == 0)
+            //     printf("DIAG RomplerVoice: HasSlice(%lu) = false\n", (unsigned long)slice);
             memset(out, 0, size * sizeof(float));
             return;
         }
         uint32_t sliceLength = sampleRom.GetSliceSize(slice);
+        if (sliceLength == 0) {
+            // Audio-thread: never printf here (see note above).
+            // static uint32_t _sliceLenDiagCtr = 0;
+            // if ((_sliceLenDiagCtr++ % 50000) == 0)
+            //     printf("DIAG RomplerVoice: slice=%lu sliceLength=0 (no data)\n", (unsigned long)slice);
+        }
 
         // bit reduction
         int16_t brr_mask = bit_reduction_masks[14 - params.bitReduction];
@@ -58,6 +69,7 @@ namespace CTAG::SYNTHESIS {
         //  set eg and lfo parameters
         ad.SetAttack(params.a);
         ad.SetDecay(params.d);
+        ad.SetLoop(params.loop); // envelope loops with the sample
 
         // calculate playback speed = dt = phase increment
         // check if time-stretch is active
@@ -135,6 +147,9 @@ namespace CTAG::SYNTHESIS {
         // TODO: check if phase increment is within bounds for buffer max size --> partially done with asserts
         //  phaseIncrementMax*size*sizeof(datatype)+4), 32(5octaves up)*32(standard buffer size) --> > 1k words, we use 2k words
         readBufferLength = static_cast<uint32_t>(phaseIncrement * float(size) + readBufferPhase);
+        if (readBufferLength > static_cast<int32_t>(readBufferMaxSize - 2)) {
+            readBufferLength = readBufferMaxSize - 2;
+        }
 
 
         // calc marks and read assemble buffers depending on playback mode

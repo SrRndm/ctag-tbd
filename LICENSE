@@ -1,18 +1,126 @@
-CTAG TBD >>to be determined<< is an open source eurorack synthesizer module.
+dadamachines TBD-16 / CTAG TBD
 
-A project conceived within the Creative Technologies Arbeitsgruppe of
-Kiel University of Applied Sciences: https://www.creative-technologies.de
+TBD "to be determined" is an open-source platform for audio DSP experimentation,
+learning, and research, bringing together high-quality generators and effects
+within a modular, easily extensible architecture.
 
-(c) 2020 by Robert Manzke. All rights reserved.
+This repository is a fork of the CTAG TBD project, conceived within the
+Creative Technologies Arbeitsgruppe of Kiel University of Applied Sciences:
+https://www.creative-technologies.de
 
-The CTAG TBD software is licensed under the GNU General Public License
-(GPL 3.0), available here: https://www.gnu.org/licenses/gpl-3.0.txt
+The CTAG TBD engine / platform core, the original REST server, the DrumRack, and
+the original hardware were developed by Robert Manzke (CTAG Kiel). On the TBD-16:
+the documentation and the WebUI are by Johannes Elias Lohbihler (dadamachines)
+alone; the TBD-16 REST server is by Johannes Elias Lohbihler, rewritten/extended
+from Robert's original; and the macro/preset system and rack layer (including
+GrooveBoxRack) are joint work by Per-Olov Jernberg (possan, https://possan.codes)
+and Johannes Elias Lohbihler, with substantial support from Robert Manzke and
+building on his DrumRack/engine.
 
-The CTAG TBD hardware design is released under the Creative Commons
-Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0).
+(c) 2020-2026 Robert Manzke. All rights reserved. (CTAG TBD engine / platform core; original REST server; DrumRack; original hardware research; substantial support on the TBD-16 macro/preset/rack layer)
+(c) 2014-2026 Johannes Elias Lohbihler for dadamachines. (documentation; WebUI [proprietary, see below]; TBD-16 REST server [rewritten from Robert's]; TBD-16 adaptation; co-author of the macro/preset/rack layer)
+(c) 2025-2026 Per-Olov Jernberg (possan), https://possan.codes (macro/preset system & rack layer — joint work with Johannes Elias Lohbihler for dadamachines, with support from Robert Manzke, building on his CTAG TBD DrumRack/engine)
+
+Per-file copyright notices and any submodule licences take precedence over the
+summary below where they differ.
+
+
+SOFTWARE LICENSE
+----------------
+
+All software in this repository is licensed under the
+GNU General Public License, version 3.0 (GPL-3.0-only), with one exception:
+the WebUI (see below). https://www.gnu.org/licenses/gpl-3.0.txt
+
+  - Core DSP engine, sound processors, platform core (upstream: ctag-fh-kiel/
+    ctag-tbd): GPL-3.0-only. Modifications must be released under GPL-3.0-only.
+  - dadamachines / Per-Olov Jernberg additions (REST API, macro/preset system,
+    rack layer, drivers, build tools, simulator, tests): GPL-3.0-only.
+  - Third-party libraries vendored under components/ and simulator/ keep their
+    own licences — see THIRD-PARTY.md.
+
+If you build a commercial product on the TBD platform and do not want GPL-3.0's
+source-disclosure obligations, a commercial licence is available — see
+COMMERCIAL LICENSE below.
+
+
+THE WebUI — NOT under the GPL
+-----------------------------
+The dadamachines TBD-16 WebUI under sdcard_image/www/ (the dadamachines-authored
+HTML, JavaScript and CSS — index.html, the *.js application files, app.css, the
+preset/macro manager, the WebUI updater, etc.) is:
+
+  (c) 2014-2026 dadamachines / Johannes Elias Lohbihler. All rights reserved.
+
+It is NOT licensed under the GPL or any other open-source licence. It is a
+separate program that communicates with the TBD-16 firmware over the firmware's
+REST API; it is not a derivative work of the firmware. You may not copy, modify,
+redistribute or reuse the WebUI without dadamachines' written permission.
+Vendored web components bundled with it (Shoelace, webaudio-controls, Sortable,
+the Shoelace theme CSS, …) keep their own licences — see THIRD-PARTY.md.
+Licensing enquiries: https://dadamachines.com/contact/
+
+
+HARDWARE DESIGNS
+----------------
+The original CTAG TBD Eurorack hardware designs by Robert Manzke (V1/V2) are
+released under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0
+International (CC BY-NC-SA 4.0).
 Details here: https://creativecommons.org/licenses/by-nc-sa/4.0/
 
-CTAG TBD is provided "as is" without any express or implied warranties.
+The dadamachines TBD-16 (desktop instrument) and TBD-Core (core DSP board for
+custom products) are commercial products. Their hardware designs are proprietary
+and not released under an open-source licence.
+
+An open-hardware core design based on the same ESP32-P4 + RP2350 platform is
+planned for future publication in KiCad as an open-source reference, to foster
+education, prototyping, and instrument design.
+
+
+THE DADAMACHINES NAME AND BRAND
+-------------------------------
+The dadamachines name, logo, and "TBD-16" product name are trademarks of
+dadamachines and are reserved for products produced by or licensed by
+dadamachines.
+
+If you build a product using the TBD platform, you may reference it as:
+  - [YourProduct] for TBD
+  - [YourProduct] (TBD-compatible)
+
+Using "dadamachines [YourProduct]" or "TBD-16 [YourProduct]" is not permitted
+without prior agreement.
+
+
+COMMERCIAL LICENSE
+------------------
+TBD is open source under GPL-3.0. If you want to build a commercial product on
+it without GPL-3.0's source-disclosure obligations — incorporate it in
+closed-source firmware, ship without attribution, negotiate custom OEM terms —
+a commercial licence is available.
+
+We also offer:
+  - TBD-Core: our core DSP board with all audio, MIDI, and USB I/O assembled;
+    connect your own UI board via the 30-pin FFC connector and design your own
+    enclosure.
+  - Custom Integration: we integrate the ESP32-P4, RP2350, and codec directly
+    onto your PCB for full control over form factor, connectors and BOM.
+  - Licensed special editions of the TBD-16.
+
+A commercial licence is also the route to use the WebUI in your own product.
+
+Contact dadamachines: https://dadamachines.com/contact/  (see also COMMERCIAL-LICENSE.md)
+
+
+CONTRIBUTING
+------------
+Contributions to the firmware are welcome under GPL-3.0. Contributors must agree
+to the Contributor Licence Agreement (so the project can offer the dual
+GPL/commercial licensing above) — see CONTRIBUTING.md.
+
+
+DISCLAIMER
+----------
+TBD is provided "as is" without any express or implied warranties.
 
 License and copyright details for specific submodules are included in their
-respective component folders / files if different from this license.
+respective component folders / files if different from this licence.

@@ -1,0 +1,1030 @@
+#!/usr/bin/env node
+/**
+ * TBD-16 WebUI — Development Server
+ *
+ * Serves the WebUI from sdcard_image/www/ and provides mock API endpoints
+ * that mirror the real ESP32 RestServer.cpp/MacroAPI.cpp/StorageAPI.cpp.
+ * Uses real data from sdcard_image/ (factory/, system/, samples/, user/).
+ *
+ * Mock API Endpoints (v2 — matching RestServer.cpp):
+ *   GET  /api/v2/device?action=getIOCaps              → IO capabilities
+ *   GET  /api/v2/device?action=getConfig               → system config
+ *   POST /api/v2/device?action=setConfig               → save config
+ *   GET  /api/v2/device?action=getFavorites             → all favorites
+ *   POST /api/v2/device?action=storeFavorite&id=N       → store favorite
+ *   POST /api/v2/device?action=recallFavorite&id=N      → recall favorite
+ *   POST /api/v2/device?action=reboot                   → reboot (no-op)
+ *   GET  /api/v2/plugins?action=list                    → list of sound processors
+ *   GET  /api/v2/plugins?action=getActive&ch=N          → active plugin for channel
+ *   POST /api/v2/plugins?action=setActive&ch=N&id=X     → set active plugin
+ *   GET  /api/v2/plugins?action=getParams&ch=N          → plugin parameters
+ *   POST /api/v2/plugins?action=setParam&ch=N&id=X&key=K&val=V → set a parameter
+ *   GET  /api/v2/plugins?action=getPresets&ch=N         → preset list for channel
+ *   POST /api/v2/plugins?action=loadPreset&ch=N&number=N → load preset
+ *   POST /api/v2/plugins?action=savePreset&ch=N&number=N&name=X → save preset
+ *   GET  /api/v2/plugins?action=getPresetData&id=X      → full preset JSON
+ *   POST /api/v2/plugins?action=setPresetData&id=X      → write preset JSON
+ *   GET  /api/v2/samples                               → file list + configfiles scan
+ *   GET  /api/v2/samples?getconfig=<path>               → serve JSON config file
+ *   POST /api/v2/samples?action=uploadconfig&path=<p>   → save JSON config file
+ *   POST /api/v2/samples?action=manage                  → delete/rename files
+ *   POST /api/v2/samples?action=reload                  → reload sample rom
+ *   GET  /api/v2/macros                                 → current track state
+ *   GET  /api/v2/macros?action=getall                   → bulk macro data
+ *   POST /api/v2/macros?action=update_track             → set track machine/macro/params
+ *   POST /api/v2/macros?action=reload                   → reload macros from disk
+ *
+ * Usage:
+ *   cd sdcard_image/www
+ *   node tools/dev-server.js [port]
+ *
+ * Default port: 3001
+ * Open http://localhost:3001/ for index.html (Plugin & Sample Manager)
+ * Open http://localhost:3001/preset-macro-manager.html for Preset & Macro Manager
+ */
+
+const http = require('http');
+const fs   = require('fs');
+const path = require('path');
+const url  = require('url');
+
+const PORT = parseInt(process.argv[2], 10) || 3001;
+const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
+const WEBROOT = path.resolve(__dirname, '..');
+const FACTORY_DIR = path.resolve(REPO_ROOT, 'sdcard_image', 'factory');
+const SAMPLE_ROOT = path.resolve(REPO_ROOT, 'sample_rom', 'tbdsamples');
+const SDCARD_ROOT = path.resolve(REPO_ROOT, 'sdcard_image');
+const DATA_DIR = SDCARD_ROOT; // Legacy alias — was sdcard_image/data/, now uses SD card root
+
+// ───────── MIME types ─────────
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.css':  'text/css; charset=utf-8',
+  '.js':   'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg':  'image/svg+xml',
+  '.png':  'image/png',
+  '.jpg':  'image/jpeg',
+  '.ico':  'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2':'font/woff2',
+  '.wav':  'audio/wav',
+};
+
+// ═══════════════════════════════════════════════════════════════
+//  IN-MEMORY STATE (mock firmware state)
+// ═══════════════════════════════════════════════════════════════
+
+let synthDefs = null;     // Loaded from synthdefinitions.json
+let pluginList = [];      // Scanned from mui-*.json (mirrors firmware SPManagerDataModel)
+const trackState = [];    // 19 tracks: { index, name, type, machine, macro, parameters[] }
+const channelState = {};  // Channel 0/1: { activePlugin, params, presets }
+let systemConfig = {};    // Loaded from spm-config.json
+const favorites = {};     // slot# -> data
+
+function loadSynthDefinitions() {
+  let p = path.join(DATA_DIR, 'synthdefinitions.json');
+  if (!fs.existsSync(p)) p = path.join(FACTORY_DIR, 'synthdefinitions.json');
+  try {
+    synthDefs = JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch (e) {
+    console.warn('Could not load synthdefinitions.json:', e.message);
+    synthDefs = { tracks: [], machines: [] };
+  }
+
+  // Build plugin list by scanning mui-*.json (then mp-*.json) in factory/plugins/,
+  // matching the real firmware's SPManagerDataModel::getSoundProcessors().
+  // Sort mui- before mp- so metadata-rich UI definitions take precedence
+  // over bare patch files during deduplication.
+  pluginList = [];
+  const spDir = path.join(FACTORY_DIR, 'plugins');
+  try {
+    const files = fs.readdirSync(spDir)
+      .filter(f => (f.startsWith('mp-') || f.startsWith('mui-')) && f.endsWith('.json'))
+      .sort((a, b) => {
+        const aPrio = a.startsWith('mui-') ? 0 : 1;
+        const bPrio = b.startsWith('mui-') ? 0 : 1;
+        return aPrio - bPrio || a.localeCompare(b);
+      });
+    for (const file of files) {
+      try {
+        const d = JSON.parse(fs.readFileSync(path.join(spDir, file), 'utf8'));
+        const id = d.id || file.replace(/^(mp|mui)-|\.json$/g, '');
+        if (!pluginList.find(p => p.id === id)) {
+          pluginList.push({
+            id: id,
+            name: d.name || id,
+            isStereo: d.isStereo || false,
+            hint: d.hint || '',
+          });
+        }
+      } catch (e) { /* skip unreadable files */ }
+    }
+  } catch (e) {
+    // directory may not exist, that's okay
+  }
+
+  // Initialize 19 track slots (0-15 instruments, 16-18 FX)
+  for (let i = 0; i < 19; i++) {
+    const trackDef = synthDefs.tracks.find(t => t.index === i);
+    trackState[i] = {
+      index: i,
+      name: trackDef ? trackDef.name : 'Track ' + (i + 1),
+      type: trackDef ? trackDef.type : 'drum',
+      machine: '',
+      macro: '',
+      parameters: [],
+    };
+  }
+
+  // Initialize channels
+  for (const ch of [0, 1]) {
+    channelState[ch] = channelState[ch] || {
+      activePlugin: pluginList.length > 0 ? pluginList[0].id : 'TBD03',
+      params: [],
+      activePreset: 0,
+    };
+  }
+}
+
+function loadSystemConfig() {
+  // The real P4 firmware returns the "configuration" object from device.json
+  // via GET /device?action=getConfig.  Our mock mirrors that shape so the
+  // WebUI sees the same JSON locally as it does on the real device.
+  //
+  // Sections: wifi, midi, audio codec levels, channel routing.
+  // WiFi and MIDI follow the same pattern: a nested object keyed by
+  // feature name matching the Pico OLED settings screens.
+  systemConfig = {
+    wifi: {
+      ssid: 'dada-tbd',
+      pwd: '',
+      mode: 'usbncm',
+      mdns_name: 'dada-tbd',
+      ip: '192.168.4.1',
+    },
+    midi: {
+      uartmidi1: { in: 'sync+notes', out: 'sync+notes' },
+      uartmidi2: { in: 'sync+notes', out: 'sync+notes' },
+      usbhost:   { in: 'sync+notes', out: 'sync+notes' },
+      usbdevice: { in: 'sync+notes', out: 'sync+notes' },
+      abletonlink: 'off',
+    },
+    ch01_daisy: 'off',
+    ch0_toStereo: 'off',
+    ch1_toStereo: 'off',
+    ch0_outputSoftClip: 'on',
+    ch1_outputSoftClip: 'on',
+    ch0_codecLvlOut: '58',
+    ch1_codecLvlOut: '58',
+  };
+}
+
+loadSynthDefinitions();
+loadSystemConfig();
+
+// ═══════════════════════════════════════════════════════════════
+//  DATA DIRECTORY HELPERS
+// ═══════════════════════════════════════════════════════════════
+
+/** Recursively scan for .json files under a directory, returning
+ *  entries with { name, path (relative folder), size, mtime } —
+ *  matching the real StorageAPI::scan_json_files format. */
+function scanJsonFiles(baseDir, relDir) {
+  const results = [];
+  const dirPath = relDir ? path.join(baseDir, relDir) : baseDir;
+  let entries;
+  try { entries = fs.readdirSync(dirPath, { withFileTypes: true }); }
+  catch (e) { return results; }
+
+  for (const ent of entries) {
+    if (ent.name.startsWith('.')) continue;
+    const relPath = relDir ? relDir + '/' + ent.name : ent.name;
+    const fullPath = path.join(baseDir, relPath);
+
+    if (ent.isDirectory()) {
+      results.push(...scanJsonFiles(baseDir, relPath));
+    } else if (ent.isFile()) {
+      const ext = path.extname(ent.name).toLowerCase();
+      if (ext === '.json') {
+        const stat = fs.statSync(fullPath);
+        results.push({
+          name: ent.name,
+          path: relDir || '',
+          size: stat.size,
+          mtime: Math.floor(stat.mtimeMs),
+        });
+      }
+    }
+  }
+  return results;
+}
+
+/** Scan WAV files under sample_rom */
+function scanWavFiles(baseDir, relDir) {
+  const results = [];
+  const dirPath = relDir ? path.join(baseDir, relDir) : baseDir;
+  let entries;
+  try { entries = fs.readdirSync(dirPath, { withFileTypes: true }); }
+  catch (e) { return results; }
+
+  for (const ent of entries) {
+    if (ent.name.startsWith('.')) continue;
+    const relPath = relDir ? relDir + '/' + ent.name : ent.name;
+    const fullPath = path.join(baseDir, relPath);
+
+    if (ent.isDirectory()) {
+      results.push(...scanWavFiles(baseDir, relPath));
+    } else if (ent.isFile()) {
+      const ext = path.extname(ent.name).toLowerCase();
+      if (ext === '.wav') {
+        const stat = fs.statSync(fullPath);
+        results.push({
+          name: ent.name,
+          path: relDir || '',
+          size: stat.size,
+        });
+      }
+    }
+  }
+  return results;
+}
+
+/** Scan directories */
+function scanDirectories(baseDir, relDir) {
+  const results = [];
+  const dirPath = relDir ? path.join(baseDir, relDir) : baseDir;
+  let entries;
+  try { entries = fs.readdirSync(dirPath, { withFileTypes: true }); }
+  catch (e) { return results; }
+
+  for (const ent of entries) {
+    if (ent.name.startsWith('.')) continue;
+    if (ent.isDirectory()) {
+      const relPath = relDir ? relDir + '/' + ent.name : ent.name;
+      results.push({ path: relPath });
+      results.push(...scanDirectories(baseDir, relPath));
+    }
+  }
+  return results;
+}
+
+/** Scan ALL files recursively under a directory (mirrors real StorageAPI scan) */
+function scanAllFiles(baseDir, relDir) {
+  const results = [];
+  const dirPath = relDir ? path.join(baseDir, relDir) : baseDir;
+  let entries;
+  try { entries = fs.readdirSync(dirPath, { withFileTypes: true }); }
+  catch (e) { return results; }
+
+  for (const ent of entries) {
+    if (ent.name.startsWith('.')) continue;
+    const relPath = relDir ? relDir + '/' + ent.name : ent.name;
+    const fullPath = path.join(baseDir, relPath);
+
+    if (ent.isDirectory()) {
+      // Skip www/ (webroot) and data/ (legacy, deprecated)
+      if (!relDir && (ent.name === 'www' || ent.name === 'data')) continue;
+      results.push(...scanAllFiles(baseDir, relPath));
+    } else if (ent.isFile()) {
+      const stat = fs.statSync(fullPath);
+      results.push({
+        name: ent.name,
+        path: relDir || '',
+        size: stat.size,
+        mtime: Math.floor(stat.mtimeMs),
+      });
+    }
+  }
+  return results;
+}
+
+/** Scan ALL directories recursively under a directory */
+function scanAllDirectories(baseDir, relDir) {
+  const results = [];
+  const dirPath = relDir ? path.join(baseDir, relDir) : baseDir;
+  let entries;
+  try { entries = fs.readdirSync(dirPath, { withFileTypes: true }); }
+  catch (e) { return results; }
+
+  for (const ent of entries) {
+    if (ent.name.startsWith('.')) continue;
+    if (ent.isDirectory()) {
+      if (!relDir && (ent.name === 'www' || ent.name === 'data')) continue;
+      const relPath = relDir ? relDir + '/' + ent.name : ent.name;
+      results.push(relPath);
+      results.push(...scanAllDirectories(baseDir, relPath));
+    }
+  }
+  return results;
+}
+
+/** Generate mock plugin params for a given plugin */
+function generateMockParams(pluginId) {
+  // Try to load the real config file if it exists (data/sp/ or factory/plugins/)
+  const candidates = [
+    path.join(FACTORY_DIR, 'plugins', `mp-${pluginId}.json`),
+    path.join(FACTORY_DIR, 'plugins', `mui-${pluginId}.json`),
+  ];
+  for (const spPath of candidates) {
+    try {
+      const data = JSON.parse(fs.readFileSync(spPath, 'utf8'));
+      if (data.params) return data;
+    } catch (e) { /* try next */ }
+  }
+
+  // Generate mock params
+  const params = [];
+  for (let i = 0; i < 8; i++) {
+    params.push({
+      id: `param_${i}`,
+      name: `Param ${i}`,
+      type: 'int',
+      current: 64,
+      min: 0,
+      max: 127,
+    });
+  }
+  return { id: pluginId, params };
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  API: /api/v2/device?action=getIOCaps
+// ═══════════════════════════════════════════════════════════════
+
+function handleGetIOCaps(req, res) {
+  // Mock IOCaps matching the real device shape
+  const triggers = [];
+  const cvs = [];
+  for (const prefix of ['A', 'B', 'C', 'D']) {
+    triggers.push(`${prefix}_NOTE`, `${prefix}_VELO`, `${prefix}_P_PROG`, `${prefix}_P_AT`);
+    cvs.push(`${prefix}_NOTE`, `${prefix}_VELO`, `${prefix}_P_BANK`, `${prefix}_P_SBNK`,
+             `${prefix}_P_PRG`, `${prefix}_P_PB`, `${prefix}_P_PB_LG`, `${prefix}_P_AT`,
+             `${prefix}_P_MW_1`, `${prefix}_P_BC_2`);
+  }
+  sendJson(res, 200, {
+    HWV: 'TBD-16',
+    FWV: '0.0.0-dev',
+    p: 'dada',
+    t: triggers,
+    cv: cvs,
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  API: /api/v2/plugins?action=list
+// ═══════════════════════════════════════════════════════════════
+
+function handleGetPlugins(req, res) {
+  sendJson(res, 200, pluginList);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  API: /api/v2/plugins?action=getActive&ch=N
+// ═══════════════════════════════════════════════════════════════
+
+function handleGetActivePlugin(req, res, channel) {
+  const cs = channelState[channel] || channelState[0];
+  sendJson(res, 200, { id: cs.activePlugin });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  API: /api/v2/plugins?action=setActive&ch=N&id=X
+// ═══════════════════════════════════════════════════════════════
+
+function handleSetActivePlugin(req, res, channel) {
+  const parsed = url.parse(req.url, true);
+  const pluginId = parsed.query.id;
+  if (!pluginId) return sendJson(res, 400, { error: 'Missing id' });
+  const cs = channelState[channel] || channelState[0];
+  cs.activePlugin = pluginId;
+  cs.params = generateMockParams(pluginId).params || [];
+  console.log(`[plugin] Channel ${channel} active plugin → ${pluginId}`);
+  sendJson(res, 200, { ok: true });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  API: /api/v2/plugins?action=getParams&ch=N
+// ═══════════════════════════════════════════════════════════════
+
+function handleGetPluginParams(req, res, channel) {
+  const cs = channelState[channel] || channelState[0];
+  const data = generateMockParams(cs.activePlugin);
+  sendJson(res, 200, data);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  API: /api/v2/plugins?action=setParam&ch=N&id=X&key=K&val=V
+// ═══════════════════════════════════════════════════════════════
+
+function handleSetPluginParam(req, res, channel) {
+  const parsed = url.parse(req.url, true);
+  const id = parsed.query.id;
+  const key = parsed.query.key || 'current';
+  const value = parsed.query.val;
+  console.log(`[param] Ch${channel} ${key} ${id} = ${value}`);
+  sendJson(res, 200, { ok: true });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  API: /api/v2/plugins?action=getPresets&ch=N
+// ═══════════════════════════════════════════════════════════════
+
+function handleGetPresets(req, res, channel) {
+  sendJson(res, 200, {
+    activePresetNumber: 0,
+    presets: [{ name: 'Default', number: 0 }],
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  API: /api/v2/plugins?action=loadPreset&ch=N&number=N
+// ═══════════════════════════════════════════════════════════════
+
+function handleLoadPreset(req, res, channel) {
+  const parsed = url.parse(req.url, true);
+  console.log(`[preset] Load preset ${parsed.query.number} on channel ${channel}`);
+  sendJson(res, 200, { ok: true });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  API: /api/v2/plugins?action=savePreset&ch=N&number=N&name=X
+// ═══════════════════════════════════════════════════════════════
+
+function handleSavePreset(req, res, channel) {
+  const parsed = url.parse(req.url, true);
+  console.log(`[preset] Save preset "${parsed.query.name}" #${parsed.query.number} on channel ${channel}`);
+  sendJson(res, 200, { ok: true });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  API: /api/v2/plugins?action=getPresetData&id=X
+// ═══════════════════════════════════════════════════════════════
+
+function handleGetPresetData(req, res, pluginId) {
+  const data = generateMockParams(pluginId);
+  sendJson(res, 200, data);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  API: /api/v2/plugins?action=setPresetData&id=X
+// ═══════════════════════════════════════════════════════════════
+
+function handleSetPresetData(req, res, pluginId) {
+  readJsonBody(req, (err, body) => {
+    if (err) return sendJson(res, 400, { error: 'Invalid JSON' });
+    console.log(`[preset] Set preset data for ${pluginId}`);
+    sendJson(res, 200, { ok: true });
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  API: /api/v2/device?action=getConfig
+// ═══════════════════════════════════════════════════════════════
+
+function handleGetConfiguration(req, res) {
+  sendJson(res, 200, systemConfig);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  API: /api/v2/device?action=setConfig
+// ═══════════════════════════════════════════════════════════════
+
+function handleSetConfiguration(req, res) {
+  readJsonBody(req, (err, body) => {
+    if (err) return sendJson(res, 400, { error: 'Invalid JSON' });
+    Object.assign(systemConfig, body);
+    console.log('[config] Configuration updated');
+    sendJson(res, 200, { ok: true });
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  API: /api/v2/device?action=getFavorites|storeFavorite|recallFavorite
+// ═══════════════════════════════════════════════════════════════
+
+function handleFavoriteGet(req, res, action) {
+  if (action === 'getFavorites') {
+    return sendJson(res, 200, Object.values(favorites));
+  }
+  sendJson(res, 400, { error: 'Unknown device GET action: ' + action });
+}
+
+function handleFavoritePost(req, res, action, query) {
+  if (action === 'storeFavorite') {
+    const idx = parseInt(query.id, 10);
+    readJsonBody(req, (err, body) => {
+      if (err) return sendJson(res, 400, { error: 'Invalid JSON' });
+      favorites[idx] = body;
+      console.log(`[fav] Stored favorite ${idx}`);
+      sendJson(res, 200, { ok: true });
+    });
+    return;
+  }
+
+  if (action === 'recallFavorite') {
+    const idx = parseInt(query.id, 10);
+    console.log(`[fav] Recalled favorite ${idx}`);
+    return sendJson(res, 200, favorites[idx] || { ok: true });
+  }
+
+  sendJson(res, 200, { ok: true });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  API: /api/v2/samples
+// ═══════════════════════════════════════════════════════════════
+
+function handleSamplesGet(req, res) {
+  const parsed = url.parse(req.url, true);
+  const q = parsed.query;
+
+  // Get a config file: ?getconfig=synthdefinitions.json
+  if (q.getconfig) {
+    // Try FACTORY_DIR first, then system/, then SD root as fallback
+    let configPath = path.join(FACTORY_DIR, q.getconfig);
+    if (!fs.existsSync(configPath)) configPath = path.join(FACTORY_DIR, q.getconfig);
+    if (!fs.existsSync(configPath)) configPath = path.join(SDCARD_ROOT, 'system', q.getconfig);
+    // Security: must stay inside sdcard_image
+    if (!configPath.startsWith(SDCARD_ROOT)) {
+      return sendJson(res, 403, { error: 'Forbidden' });
+    }
+    try {
+      const raw = fs.readFileSync(configPath, 'utf8');
+      res.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-cache',
+      });
+      return res.end(raw);
+    } catch (e) {
+      return sendJson(res, 404, { error: 'Not found: ' + q.getconfig });
+    }
+  }
+
+  // Fetch file (inline view): ?fetch=path/to/file
+  if (q.fetch) {
+    const fetchPath = path.join(SDCARD_ROOT, q.fetch);
+    if (!fetchPath.startsWith(SDCARD_ROOT)) {
+      return sendJson(res, 403, { error: 'Forbidden' });
+    }
+    try {
+      const stat = fs.statSync(fetchPath);
+      const ext = path.extname(fetchPath).toLowerCase();
+      const mime = MIME[ext] || 'application/octet-stream';
+      res.writeHead(200, {
+        'Content-Type': mime,
+        'Content-Length': stat.size,
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-cache',
+      });
+      return fs.createReadStream(fetchPath).pipe(res);
+    } catch (e) {
+      return sendJson(res, 404, { error: 'Not found: ' + q.fetch });
+    }
+  }
+
+  // Download file: ?download=path/to/file
+  if (q.download) {
+    const dlPath = path.join(SDCARD_ROOT, q.download);
+    if (!dlPath.startsWith(SDCARD_ROOT)) {
+      return sendJson(res, 403, { error: 'Forbidden' });
+    }
+    try {
+      const stat = fs.statSync(dlPath);
+      const filename = path.basename(dlPath);
+      res.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': 'attachment; filename="' + filename + '"',
+        'Content-Length': stat.size,
+        'Access-Control-Allow-Origin': '*',
+      });
+      return fs.createReadStream(dlPath).pipe(res);
+    } catch (e) {
+      return sendJson(res, 404, { error: 'Not found: ' + q.download });
+    }
+  }
+
+  // Preview WAV: ?preview=path/name.wav
+  if (q.preview) {
+    const wavPath = path.join(SAMPLE_ROOT, q.preview);
+    if (!wavPath.startsWith(SAMPLE_ROOT)) {
+      return sendJson(res, 403, { error: 'Forbidden' });
+    }
+    try {
+      const stat = fs.statSync(wavPath);
+      res.writeHead(200, {
+        'Content-Type': 'audio/wav',
+        'Content-Length': stat.size,
+        'Access-Control-Allow-Origin': '*',
+      });
+      return fs.createReadStream(wavPath).pipe(res);
+    } catch (e) {
+      return sendJson(res, 404, { error: 'Not found' });
+    }
+  }
+
+  // Default: full response matching real StorageAPI::samples_get_handler
+  // Scan entire sdcard_image/ directory (mirrors real device scanning /sdcard/)
+  const configfiles = scanJsonFiles(DATA_DIR, '');
+  const files = scanAllFiles(SDCARD_ROOT, '');
+  const directories = scanAllDirectories(SDCARD_ROOT, '');
+
+  // Load kits from sample_rom.json if available
+  let kits = {};
+  try {
+    let sampleRomPath = path.join(DATA_DIR, 'sample_rom.json');
+    if (!fs.existsSync(sampleRomPath)) sampleRomPath = path.join(FACTORY_DIR, 'kits', 'sample_rom.json');
+    const sampleRom = JSON.parse(
+      fs.readFileSync(sampleRomPath, 'utf8')
+    );
+    kits = {
+      smp_banks: sampleRom.smp_banks || [],
+      smp_bank_names: sampleRom.smp_bank_names || [],
+      smp_bank_tags: sampleRom.smp_bank_tags || [],
+      active_smp_bank: sampleRom.active_smp_bank || 0,
+    };
+  } catch (e) {
+    kits = { smp_banks: [], smp_bank_names: [], smp_bank_tags: [], active_smp_bank: 0 };
+  }
+
+  return sendJson(res, 200, {
+    files,
+    directories,
+    configfiles,
+    kits,
+    capacity: { total: 32000000000, used: 1000000000 },
+    active_kit_entries: [],
+  });
+}
+
+function handleSamplesPost(req, res) {
+  const parsed = url.parse(req.url, true);
+  const action = parsed.query.action || '';
+
+  if (action === 'uploadconfig') {
+    const filePath = parsed.query.path;
+    if (!filePath) {
+      return sendJson(res, 400, { error: 'Missing path parameter' });
+    }
+    const fullPath = path.join(DATA_DIR, filePath);
+    if (!fullPath.startsWith(DATA_DIR)) {
+      return sendJson(res, 403, { error: 'Forbidden' });
+    }
+    readBody(req, (err, body) => {
+      if (err) return sendJson(res, 400, { error: 'Bad request' });
+      const dir = path.dirname(fullPath);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(fullPath, body);
+      console.log(`[upload] Wrote ${filePath} (${body.length} bytes)`);
+      sendJson(res, 200, { ok: true });
+    });
+    return;
+  }
+
+  if (action === 'manage') {
+    readJsonBody(req, (err, body) => {
+      if (err) return sendJson(res, 400, { error: 'Invalid JSON' });
+      if (body.action === 'deleteconfig') {
+        const fullPath = path.join(DATA_DIR, body.path);
+        if (fullPath.startsWith(DATA_DIR) && fs.existsSync(fullPath)) {
+          fs.unlinkSync(fullPath);
+          console.log(`[delete] Removed ${body.path}`);
+        }
+      } else if (body.action === 'rename') {
+        console.log(`[manage] rename ${body.from} → ${body.to}`);
+      } else if (body.action === 'delete') {
+        console.log(`[manage] delete ${body.path}`);
+      } else if (body.action === 'saveKit' || body.action === 'createKit' || body.action === 'deleteKit') {
+        console.log(`[manage] ${body.action}`);
+      } else if (body.action === 'createFolder' || body.action === 'renameFolder' || body.action === 'deleteFolder') {
+        console.log(`[manage] ${body.action} ${body.path || ''}`);
+      }
+      sendJson(res, 200, { ok: true });
+    });
+    return;
+  }
+
+  if (action === 'upload') {
+    // WAV file upload — accept and discard in dev mode
+    readBody(req, (err, body) => {
+      console.log(`[upload] WAV upload to ${parsed.query.path}/${parsed.query.filename} (${body ? body.length : 0} bytes) — dev mode, not saved`);
+      sendJson(res, 200, { ok: true });
+    });
+    return;
+  }
+
+  if (action === 'reload') {
+    console.log('[samples] Reload PSRAM sample rom requested');
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  sendJson(res, 400, { error: 'Unknown action: ' + action });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  API: /api/v2/macros
+// ═══════════════════════════════════════════════════════════════
+
+function handleMacroApiGet(req, res) {
+  const parsed = url.parse(req.url, true);
+  const action = parsed.query.action || '';
+
+  if (action === 'get_trackdefaults') {
+    // Return the actual factory trackdefaults file
+    const tdFile = parsed.query.file || 'default.json';
+    const safeName = path.basename(tdFile);
+    const factoryPath = path.join(FACTORY_DIR, 'trackdefaults', safeName);
+    const userPath = path.join(path.dirname(FACTORY_DIR), 'user', 'trackdefaults', safeName);
+    let tdPath = fs.existsSync(userPath) && safeName !== '.gitkeep' ? userPath : factoryPath;
+    try {
+      const content = JSON.parse(fs.readFileSync(tdPath, 'utf8'));
+      return sendJson(res, 200, content);
+    } catch (e) {
+      return sendJson(res, 200, { tracks: [] });
+    }
+  }
+
+  if (action === 'get_active_trackdefault') {
+    const cfgPath = path.join(path.dirname(FACTORY_DIR), 'user', 'config', 'active-trackdefault.txt');
+    let name = 'default';
+    try {
+      name = fs.readFileSync(cfgPath, 'utf8').trim() || 'default';
+    } catch (e) { /* file not found — use default */ }
+    return sendJson(res, 200, { name });
+  }
+
+  if (action === 'getall') {
+    // Bulk endpoint — return macroDefs, soundPresets, and tracks
+    // Scan factory/macros for macro definitions
+    let macroDefs = scanJsonFiles(FACTORY_DIR, 'macros').map(f => {
+      try {
+        return JSON.parse(fs.readFileSync(path.join(FACTORY_DIR, f.path ? f.path + '/' + f.name : f.name), 'utf8'));
+      } catch (e) { return null; }
+    }).filter(Boolean);
+    const soundPresets = scanJsonFiles(FACTORY_DIR, 'presets').map(f => {
+      try {
+        return JSON.parse(fs.readFileSync(path.join(FACTORY_DIR, f.path ? f.path + '/' + f.name : f.name), 'utf8'));
+      } catch (e) { return null; }
+    }).filter(Boolean);
+    const tracks = trackState.slice(0, 19).map(t => ({
+      index: t.index, name: t.name, type: t.type,
+      machine: t.machine, macro: t.macro,
+    }));
+    return sendJson(res, 200, { macroDefs, soundPresets, tracks });
+  }
+
+  // Default: return tracks
+  const tracks = trackState.slice(0, 19).map(t => ({
+    index: t.index,
+    name: t.name,
+    type: t.type,
+    machine: t.machine,
+    macro: t.macro,
+  }));
+  sendJson(res, 200, { tracks });
+}
+
+function handleMacroApiPost(req, res) {
+  const parsed = url.parse(req.url, true);
+  const action = parsed.query.action || '';
+
+  if (action === 'save_trackdefaults') {
+    return readJsonBody(req, (err, body) => {
+      if (err) return sendJson(res, 400, { error: 'Invalid JSON' });
+      const safeName = path.basename(parsed.query.file || 'default.json');
+      const userDir = path.join(path.dirname(FACTORY_DIR), 'user', 'trackdefaults');
+      try {
+        if (!fs.existsSync(userDir)) fs.mkdirSync(userDir, { recursive: true });
+        fs.writeFileSync(path.join(userDir, safeName), JSON.stringify(body, null, 2), 'utf8');
+        console.log(`[trackdefaults] Saved ${safeName}`);
+        return sendJson(res, 200, { ok: true });
+      } catch (e) {
+        return sendJson(res, 500, { error: e.message });
+      }
+    });
+  }
+
+  if (action === 'set_active_trackdefault') {
+    return readJsonBody(req, (err, body) => {
+      if (err) return sendJson(res, 400, { error: 'Invalid JSON' });
+      const name = (body.name || '').trim();
+      if (!name) return sendJson(res, 400, { error: 'Missing name' });
+      const cfgDir = path.join(path.dirname(FACTORY_DIR), 'user', 'config');
+      try {
+        if (!fs.existsSync(cfgDir)) fs.mkdirSync(cfgDir, { recursive: true });
+        fs.writeFileSync(path.join(cfgDir, 'active-trackdefault.txt'), name, 'utf8');
+        console.log(`[trackdefaults] Active boot default set to "${name}"`);
+        return sendJson(res, 200, { ok: true });
+      } catch (e) {
+        return sendJson(res, 500, { error: e.message });
+      }
+    });
+  }
+
+  if (action === 'update_track' || action === 'set_track_parameters') {
+    readJsonBody(req, (err, body) => {
+      if (err) return sendJson(res, 400, { error: 'Invalid JSON' });
+
+      const trackIdx = body.track;
+      if (trackIdx === undefined || trackIdx < 0 || trackIdx >= 19) {
+        return sendJson(res, 400, { error: 'Invalid track index' });
+      }
+
+      const ts = trackState[trackIdx];
+      if (body.machine !== undefined) {
+        ts.machine = body.machine;
+        console.log(`[macro] Track ${trackIdx} machine → ${body.machine}`);
+      }
+      if (body.macro !== undefined) {
+        ts.macro = body.macro;
+        console.log(`[macro] Track ${trackIdx} macro → ${body.macro}`);
+      }
+      if (body.parameters !== undefined && Array.isArray(body.parameters)) {
+        ts.parameters = body.parameters;
+        const abbreviated = body.parameters.length > 4
+          ? body.parameters.slice(0, 4).join(', ') + '...'
+          : body.parameters.join(', ');
+        console.log(`[macro] Track ${trackIdx} params → [${abbreviated}]`);
+      }
+
+      sendJson(res, 200, { ok: true });
+    });
+    return;
+  }
+
+  if (action === 'reload') {
+    console.log('[macroapi] Reload macros from disk');
+    loadSynthDefinitions();
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  sendJson(res, 400, { error: 'Unknown action: ' + action });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  STATIC FILE SERVING
+// ═══════════════════════════════════════════════════════════════
+
+function serveStatic(req, res) {
+  let reqPath = url.parse(req.url).pathname;
+  if (reqPath === '/') reqPath = '/index.html';
+
+  const filePath = path.join(WEBROOT, path.normalize(reqPath));
+  if (!filePath.startsWith(WEBROOT)) {
+    res.writeHead(403);
+    return res.end('Forbidden');
+  }
+
+  fs.stat(filePath, (err, stat) => {
+    if (err || !stat.isFile()) {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      return res.end('Not found: ' + reqPath);
+    }
+
+    const ext = path.extname(filePath).toLowerCase();
+    const mime = MIME[ext] || 'application/octet-stream';
+
+    res.writeHead(200, {
+      'Content-Type': mime,
+      'Content-Length': stat.size,
+      'Cache-Control': 'no-cache',
+      'Access-Control-Allow-Origin': '*',
+    });
+
+    fs.createReadStream(filePath).pipe(res);
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  UTILITY
+// ═══════════════════════════════════════════════════════════════
+
+function sendJson(res, code, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(code, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+    'Access-Control-Allow-Origin': '*',
+    'Cache-Control': 'no-cache',
+  });
+  res.end(body);
+}
+
+function readBody(req, cb) {
+  let chunks = [];
+  req.on('data', c => chunks.push(c));
+  req.on('end', () => cb(null, Buffer.concat(chunks).toString()));
+}
+
+function readJsonBody(req, cb) {
+  readBody(req, (err, body) => {
+    if (err) return cb(err);
+    try {
+      cb(null, JSON.parse(body));
+    } catch (e) {
+      cb(e);
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  ROUTER
+// ═══════════════════════════════════════════════════════════════
+
+const server = http.createServer((req, res) => {
+  const parsed = url.parse(req.url, true);
+  const p = parsed.pathname;
+
+  // Logging
+  const ts = new Date().toISOString().slice(11, 19);
+  if (!p.includes('favicon')) {
+    console.log(`  ${ts} ${req.method} ${p}${parsed.search || ''}`);
+  }
+
+  // CORS preflight
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    });
+    return res.end();
+  }
+
+  // ── API Routes (v2 — action-based dispatch) ──
+
+  // /api/v2/plugins
+  if (p === '/api/v2/plugins' && req.method === 'GET') {
+    const action = parsed.query.action || '';
+    const ch = parseInt(parsed.query.ch || '0', 10);
+    if (action === 'list') return handleGetPlugins(req, res);
+    if (action === 'getActive') return handleGetActivePlugin(req, res, ch);
+    if (action === 'getParams') return handleGetPluginParams(req, res, ch);
+    if (action === 'getPresets') return handleGetPresets(req, res, ch);
+    if (action === 'getPresetData') return handleGetPresetData(req, res, parsed.query.id);
+    return sendJson(res, 400, { error: 'Unknown plugins GET action: ' + action });
+  }
+  if (p === '/api/v2/plugins' && req.method === 'POST') {
+    const action = parsed.query.action || '';
+    const ch = parseInt(parsed.query.ch || '0', 10);
+    if (action === 'setActive') return handleSetActivePlugin(req, res, ch);
+    if (action === 'setParam') return handleSetPluginParam(req, res, ch);
+    if (action === 'loadPreset') return handleLoadPreset(req, res, ch);
+    if (action === 'savePreset') return handleSavePreset(req, res, ch);
+    if (action === 'setPresetData') return handleSetPresetData(req, res, parsed.query.id);
+    return sendJson(res, 400, { error: 'Unknown plugins POST action: ' + action });
+  }
+
+  // /api/v2/device
+  if (p === '/api/v2/device' && req.method === 'GET') {
+    const action = parsed.query.action || '';
+    if (action === 'getIOCaps') return handleGetIOCaps(req, res);
+    if (action === 'getConfig') return handleGetConfiguration(req, res);
+    if (action === 'getAppInfo') return sendJson(res, 200, { pico_version: '0.0.0-dev' });
+    if (action === 'getFavorites') return handleFavoriteGet(req, res, action);
+    return sendJson(res, 400, { error: 'Unknown device GET action: ' + action });
+  }
+  if (p === '/api/v2/device' && req.method === 'POST') {
+    const action = parsed.query.action || '';
+    if (action === 'setConfig') return handleSetConfiguration(req, res);
+    if (action === 'reboot') {
+      console.log('[reboot] Reboot requested — ignored in dev mode');
+      return sendJson(res, 200, { ok: true });
+    }
+    if (action === 'storeFavorite' || action === 'recallFavorite')
+      return handleFavoritePost(req, res, action, parsed.query);
+    return sendJson(res, 400, { error: 'Unknown device POST action: ' + action });
+  }
+
+  // /api/v2/samples + /api/v2/storage (JS uses /api/v2/storage)
+  if ((p === '/api/v2/samples' || p === '/api/v2/storage') && req.method === 'GET')
+    return handleSamplesGet(req, res);
+  if ((p === '/api/v2/samples' || p === '/api/v2/storage') && req.method === 'POST')
+    return handleSamplesPost(req, res);
+
+  // /api/v2/macros
+  if (p === '/api/v2/macros' && req.method === 'GET')
+    return handleMacroApiGet(req, res);
+  if (p === '/api/v2/macros' && req.method === 'POST')
+    return handleMacroApiPost(req, res);
+
+  // Static files (catch-all — matches real RestServer.cpp behavior)
+  serveStatic(req, res);
+});
+
+server.listen(PORT, () => {
+  console.log(`\n  TBD-16 WebUI Dev Server`);
+  console.log(`  ──────────────────────────────────────`);
+  console.log(`  Static files : ${WEBROOT}`);
+  console.log(`  Data dir     : ${DATA_DIR}`);
+  console.log(`  Sample dir   : ${SAMPLE_ROOT}`);
+  console.log(`  Listening    : http://localhost:${PORT}`);
+  console.log();
+  console.log(`  Pages:`);
+  console.log(`    http://localhost:${PORT}/                          → Plugin & Sample Manager`);
+  console.log(`    http://localhost:${PORT}/preset-macro-manager.html → Preset & Macro Manager`);
+  console.log();
+});

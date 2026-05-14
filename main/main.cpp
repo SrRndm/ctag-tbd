@@ -26,6 +26,10 @@ respective component folders / files if different from this license.
 #include "esp_log.h"
 #include "fs.hpp"
 #include "led_rgb_bba.hpp"
+#if CONFIG_TBD_USE_RP2350
+#include "pico_firmware_update.hpp"
+#include "pico_reset.hpp"
+#endif
 
 #include "SPManager.hpp"
 #include "ctagSPAllocator.hpp"
@@ -49,6 +53,15 @@ void app_main() {
 
     DRIVERS::LedRGB::InitLedRGB();
     DRIVERS::LedRGB::SetLedRGB(0, 0, 255);
+
+#if CONFIG_TBD_USE_RP2350
+    // Always configure Pico RESET and BOOTSEL3 GPIOs to known HIGH state,
+    // even when no firmware update is pending.  Without this, the lines
+    // float after P4 reset and can hold the Pico in RESET or picoboot3 mode.
+    DRIVERS::PicoReset::Init();
+    DRIVERS::PicoFirmwareUpdate::CheckAndFlash();
+    DRIVERS::PicoFirmwareUpdate::CheckP4VersionChange();
+#endif
 
     AUDIO::SoundProcessorManager::StartSoundProcessor();
 }

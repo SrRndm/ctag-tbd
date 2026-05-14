@@ -1,0 +1,77 @@
+/***************
+TBD-16 — Macro/Preset System & GrooveBoxRack
+
+(c) 2024-2026 Per-Olov Jernberg (possan). https://possan.codes
+(c) 2024-2026 Johannes Elias Lohbihler for dadamachines.
+Based in part on the CTAG TBD DrumRack / engine by Robert Manzke (CTAG Kiel).
+
+Licensed under the GNU General Public License (GPL 3.0):
+https://www.gnu.org/licenses/gpl-3.0.txt
+
+A commercial licence is available — contact https://dadamachines.com/contact/
+
+Provided "as is" without any express or implied warranties.
+See LICENSE in the repository root for full terms.
+
+SPDX-License-Identifier: GPL-3.0-only
+***************/
+
+#include "RackSynth.hpp"
+#include "RackHH2.hpp"
+#include "../ctagSoundProcessorGrooveBoxRack.hpp"
+
+using namespace CTAG::SP;
+
+void RackHH2::Init(const GrooveBoxRackInitData *initdata) {
+    hh2.Init();
+
+    initdata->rack->registerParamAndCC(initdata, "f0", 8, [&](const int val){ f0 = val;});
+    initdata->rack->registerParamAndCC(initdata, "tone", 9, [&](const int val){ tone = val;});
+    initdata->rack->registerParamAndCC(initdata, "decay", 10, [&](const int val){ decay = val;});
+    initdata->rack->registerParamAndCC(initdata, "noise", 11, [&](const int val){ noise = val;});
+    initdata->rack->registerParamAndCC(initdata, "accent", 12, [&](const int val){ accent = val;});
+    
+    this->enabled = false;
+}
+
+void RackHH2::trigger() {
+    midi_trig = true;
+}
+
+void RackHH2::Process(const GrooveBoxRackProcessData &data) {
+    if (!this->enabled) {
+        return;
+    }
+
+    std::fill_n(out, BUF_SZ, 0.f);
+
+    bool _trig = midi_trig;
+    if (_trig != trig_prev) {
+        trig_prev = _trig;
+    }
+    midi_trig = false;
+
+    MK_FLT_PAR_ABS_NOCV(_accent, accent, 4095.f, 1.f)
+    MK_FLT_PAR_ABS_MIN_MAX_NOCV(_f0, f0, 4095.f, .00001f, .1f)
+    MK_FLT_PAR_ABS_NOCV(_tone, tone, 4095.f, 1.f)
+    MK_FLT_PAR_ABS_NOCV(_decay, decay, 4095.f, 1.f)
+    MK_FLT_PAR_ABS_NOCV(_noise, noise, 4095.f, 1.f)
+    hh2.Render(
+        false,
+        _trig,
+        _accent,
+        _f0,
+        _tone,
+        _decay,
+        _noise,
+        temp1,
+        temp2,
+        out,
+        BUF_SZ);
+
+    if (out[0] != out[0]) {
+        // Audio-thread: no printf — see RackABD.cpp note. Recovery via Init below.
+        // printf("RackHH2: NaN detected!\n");
+        hh2.Init();
+    }
+}

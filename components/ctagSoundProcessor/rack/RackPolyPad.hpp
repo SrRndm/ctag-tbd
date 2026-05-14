@@ -1,0 +1,71 @@
+/***************
+TBD-16 — Macro/Preset System & GrooveBoxRack
+
+(c) 2024-2026 Per-Olov Jernberg (possan). https://possan.codes
+(c) 2024-2026 Johannes Elias Lohbihler for dadamachines.
+Based in part on the CTAG TBD DrumRack / engine by Robert Manzke (CTAG Kiel).
+
+Licensed under the GNU General Public License (GPL 3.0):
+https://www.gnu.org/licenses/gpl-3.0.txt
+
+A commercial licence is available — contact https://dadamachines.com/contact/
+
+Provided "as is" without any express or implied warranties.
+See LICENSE in the repository root for full terms.
+
+SPDX-License-Identifier: GPL-3.0-only
+***************/
+
+#pragma once
+#include "RackSynth.hpp"
+#include "braids/macro_oscillator.h"
+#include "braids/settings.h"
+#include "braids/quantizer.h"
+#include "helpers/ctagSampleRom.hpp"
+#include "helpers/ctagADEnv.hpp"
+#include "polypad/ChordSynth.hpp"
+
+using namespace CTAG::SP;
+
+class RackPolyPad {
+public:
+    void Process(const GrooveBoxRackProcessData &data);
+    void Init(const GrooveBoxRackInitData *initdata);
+	bool enabled;
+    float pp_out_stereo[BUF_SZ * 2];
+	void noteOn(uint8_t note, uint8_t vel);
+	void noteOff(uint8_t note, uint8_t vel);
+
+private:
+    bool pp_trig_prev {false};
+	array<ChordSynth, 1> pp_v_voices;
+	bool pp_latchVoice = false;
+	bool pp_latched = false;
+	bool pp_toggle = false;
+	int32_t pp_preNCVoices = 0;
+	braids::Quantizer pp_quantizer;
+	bool trig_prev {false};
+	float midi_freq {0.0f};
+	int midi_note {0};
+	bool midi_trig {false};
+
+	atomic<int16_t> pp_q_scale;
+	atomic<int16_t> pp_chord;
+	atomic<int16_t> pp_inversion;
+	atomic<int16_t> pp_detune;
+	atomic<int16_t> pp_nnotes;
+	atomic<int16_t> pp_voicehold;
+	atomic<int16_t> pp_lfo1_freq;
+	atomic<int16_t> pp_lfo1_amt;
+	atomic<int16_t> pp_filter_type;
+	atomic<int16_t> pp_cutoff;
+	atomic<int16_t> pp_resonance;
+	atomic<int16_t> pp_lfo2_freq;
+	atomic<int16_t> pp_lfo2_amt;
+	atomic<int16_t> pp_lfo2_rphase;
+	atomic<int16_t> pp_eg_filt_amt;
+	atomic<int16_t> pp_attack;
+	atomic<int16_t> pp_decay;
+	atomic<int16_t> pp_sustain;
+	atomic<int16_t> pp_release;
+};
